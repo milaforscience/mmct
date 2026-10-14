@@ -3,6 +3,7 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig
 import pandas as pd
+from sklearn.model_selection import train_test_split
 import torch
 
 
@@ -31,11 +32,17 @@ def get_model(task, i, cfg, batch_size=None,
     if os.path.exists(f'{cfg.data_dir}/{task}/train{i}.csv') and os.path.exists(f'{cfg.data_dir}/{task}/val{i}.csv'):
         train_df = f'{cfg.data_dir}/{task}/train{i}.csv'
         val_df = f'{cfg.data_dir}/{task}/val{i}.csv'
-    elif os.path.exists(f'{cfg.data_dir}/{task}/train.csv') and os.path.exists(f'{cfg.data_dir}/{task}/val.csv'):
-        train_data = f'{cfg.data_dir}/{task}/train.csv'
-        val_data = f'{cfg.data_dir}/{task}/val.csv'
+    elif os.path.exists(f'{cfg.data_dir}/{task}/train_data.csv'):
+        train_data = f'{cfg.data_dir}/{task}/train_data.csv'
         train_df = pd.read_csv(train_data)
-        val_df = pd.read_csv(val_data)
+        if os.path.exists(f'{cfg.data_dir}/{task}/val_data.csv'):
+            val_data = f'{cfg.data_dir}/{task}/val_data.csv'
+            val_df = pd.read_csv(val_data)
+        else:
+            # split using the split ration from config using sklearn split
+            split_ratio = cfg.val_split_ratio
+            train_df, val_df = train_test_split(train_df, test_size=split_ratio, random_state=cfg.seed)
+                        
         if 'Fold' not in train_df.columns or 'Fold' not in val_df.columns:
             raise ValueError(f'Fold column not found in train.csv or val.csv for {task}. Please ensure that the Fold column is present in both files.')
         train_df = train_df[train_df['Fold'] == i]

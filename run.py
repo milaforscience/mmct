@@ -35,7 +35,7 @@ def get_model(task, i, cfg, batch_size=None,
     if os.path.exists(f'{cfg.data_dir}/{task}/train{i}.csv') and os.path.exists(f'{cfg.data_dir}/{task}/val{i}.csv'):
         train_df = f'{cfg.data_dir}/{task}/train{i}.csv'
         val_df = f'{cfg.data_dir}/{task}/val{i}.csv'
-    else:
+    elif os.path.exists(f'{cfg.data_dir}/{task}/train.csv') and os.path.exists(f'{cfg.data_dir}/{task}/val.csv'):
         train_data = f'{cfg.data_dir}/{task}/train.csv'
         val_data = f'{cfg.data_dir}/{task}/val.csv'
         train_df = pd.read_csv(train_data)
@@ -44,6 +44,8 @@ def get_model(task, i, cfg, batch_size=None,
             raise ValueError(f'Fold column not found in train.csv or val.csv for {task}. Please ensure that the Fold column is present in both files.')
         train_df = train_df[train_df['Fold'] == i]
         val_df = val_df[val_df['Fold'] == i]
+    else:
+        raise ValueError(f'Data files for {task} not found at {cfg.data_dir}/{task}. Please ensure that train{i}.csv and val{i}.csv or train.csv and val.csv are present in the directory.')
 
     # Load the train and validation data before fitting the network
     data_size = train_df.shape[0] if isinstance(train_df, pd.DataFrame) else pd.read_csv(train_df).shape[0]

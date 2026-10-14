@@ -148,4 +148,4 @@ dmypy.json
 .pyre/
 
 # hydra outputs
-./outputs
+outputs

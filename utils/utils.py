@@ -760,6 +760,7 @@ class Lookahead(Optimizer):
         if not 1 <= k:
             raise ValueError(f"Invalid lookahead steps: {k}")
         defaults = dict(lookahead_alpha=alpha, lookahead_k=k, lookahead_step=0)
+        super(Lookahead, self).__init__(base_optimizer.param_groups, defaults)
         self.base_optimizer = base_optimizer
         self.param_groups = self.base_optimizer.param_groups
         self.defaults = base_optimizer.defaults

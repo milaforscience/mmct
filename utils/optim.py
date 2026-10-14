@@ -114,8 +114,12 @@ class SWA(Optimizer):
             raise ValueError(f"Invalid SWA learning rate: {swa_lr}")
 
         self.optimizer = optimizer
+        self.add_param_group = Optimizer.add_param_group.__get__(self, SWA)
 
-        self.defaults = self.optimizer.defaults
+        super(SWA, self).__init__(self.optimizer.param_groups,
+                                  self.optimizer.defaults)
+        del self.add_param_group
+        # self.defaults = self.optimizer.defaults
         self.param_groups = self.optimizer.param_groups
         self.state = defaultdict(dict)
         self.opt_state = self.optimizer.state

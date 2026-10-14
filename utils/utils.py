@@ -1,6 +1,8 @@
 import os
 import gc
 
+from omegaconf import OmegaConf
+from hydra.core.hydra_config import HydraConfig
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -837,6 +839,20 @@ class Lookahead(Optimizer):
                 for group in self.param_groups:
                     group.setdefault(name, default)
 
+
+def get_expt_choices():
+    """
+    Retrieve experiment configuration choices from Hydra.
+
+    Returns:
+        Tuple[str, str, str, str]: Model, task, vocab, and logger choices.
+    """
+    hydra_cfg = HydraConfig.get()
+    hydra_cfg = OmegaConf.to_container(hydra_cfg.runtime.choices)
+
+    return (
+        hydra_cfg["task"]
+    )
 
 # %%
 if __name__ == '__main__':

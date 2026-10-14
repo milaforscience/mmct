@@ -1,18 +1,8 @@
 defaults:
-  - task: eform
-  - logger: debug
+  - task: null
   - _self_
 
-hydra:
-  run:
-    dir: ${logger.results}/hydra/${hydra.job.name}/${now:%Y-%m-%d_%H-%M}
-
-device: null
+data_dir: 'data/matbench_cv'
 n_splits: 5
-num_workers: 2
 test: true
-save_model: False
 seed: 12345
-val_split_ratio: 0.2
-limit: null
-gradient_clip_val: 1.0

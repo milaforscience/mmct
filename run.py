@@ -8,14 +8,10 @@ import torch
 
 from crabnet.kingcrab import CrabNet
 from crabnet.model import Model
-from mmct.utils.utils import get_expt_choices
+from utils.utils import get_expt_choices
 from utils.get_compute_device import get_compute_device
 
 compute_device = get_compute_device(prefer_last=False)
-RNG_SEED = 42
-torch.manual_seed(RNG_SEED)
-np.random.seed(RNG_SEED)
-
 
 # %%
 def get_model(task, i, cfg, batch_size=None,
@@ -120,13 +116,16 @@ def run_experiment_per_task(cfg, task):
         model = get_model(task, i, cfg, verbose=True)
         print('=====================================================')
         print('calculating test mae')
-        model_test, t_mae = save_results(task, i, cfg,
+        if cfg.test:
+            model_test, t_mae = save_results(task, i, cfg,
                                             f'test{i}.csv', verbose=False)
+            maes.append(t_mae)
+
         print('calculating val mae')
         model_val, v_mae = save_results(task, i, cfg,
                                         f'val{i}.csv', verbose=False)
-        maes.append(t_mae)
-    print(f'Average test mae: {np.mean(maes)}')
+    if cfg.test:
+        print(f'Average test mae: {np.mean(maes)}')
     print('=====================================================')
     
 # %%
@@ -144,6 +143,9 @@ def run_experiment(cfg, task = None):
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig):
+    RNG_SEED = cfg.seed
+    torch.manual_seed(RNG_SEED)
+    np.random.seed(RNG_SEED)
     task = get_expt_choices()
     run_experiment(cfg, task)
 

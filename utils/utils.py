@@ -1,6 +1,9 @@
 import os
 import gc
+from typing import Any
 
+from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -758,6 +761,7 @@ class Lookahead(Optimizer):
         if not 1 <= k:
             raise ValueError(f"Invalid lookahead steps: {k}")
         defaults = dict(lookahead_alpha=alpha, lookahead_k=k, lookahead_step=0)
+        super(Lookahead, self).__init__(base_optimizer.param_groups, defaults)
         self.base_optimizer = base_optimizer
         self.param_groups = self.base_optimizer.param_groups
         self.defaults = base_optimizer.defaults
@@ -837,6 +841,26 @@ class Lookahead(Optimizer):
                 for group in self.param_groups:
                     group.setdefault(name, default)
 
+
+def get_expt_choices():
+    """
+    Retrieve experiment configuration choices from Hydra.
+
+    Returns:
+        Tuple[str, str, str, str]: Model, task, vocab, and logger choices.
+    """
+    hydra_cfg = HydraConfig.get()
+    hydra_cfg = OmegaConf.to_container(hydra_cfg.runtime.choices)
+
+    return (
+        hydra_cfg["task"]
+    )
+
+def to_dict(cfg: Any) -> DictConfig:
+    """Convert a Hydra config to a plain Python dict."""
+    if isinstance(cfg, DictConfig):
+        cfg = OmegaConf.to_container(cfg, resolve=True)
+    return cfg
 
 # %%
 if __name__ == '__main__':

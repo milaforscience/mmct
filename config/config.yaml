@@ -1,0 +1,9 @@
+defaults:
+  - task: null
+  - _self_
+
+data_dir: 'data/matbench_cv'
+n_splits: 5
+test: true
+seed: 12345
+val_split_ratio: 0.2

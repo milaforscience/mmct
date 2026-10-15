@@ -149,4 +149,7 @@ dmypy.json
 
 # hydra outputs
 outputs
-publication_predictions
+publication_predictions/*
+
+#slurm output files
+*.out

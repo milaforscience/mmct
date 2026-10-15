@@ -3,6 +3,8 @@
 #
 # Usage: bash scripts/jobs/run_all_tasks.sh
 # Example: bash scripts/jobs/run_all_tasks.sh
+# Run jobs in the project directory, using the normal local output folders.
+# Slurm output and error logs are also written to the project directory.
 
 set -euo pipefail
 
@@ -13,6 +15,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LOGS_DIR="$PROJECT_ROOT"
 
 if [ ! -f "$PROJECT_ROOT/run.py" ] || [ ! -x "$PROJECT_ROOT/.venv/bin/python" ]; then
     echo "Expected run.py and .venv/bin/python in: $PROJECT_ROOT" >&2
@@ -33,25 +36,7 @@ for TASK in "${TASKS[@]}"; do
 done
 
 USER_NAME="${USER:-$(whoami)}"
-SCRATCH_BASE=""
-
-for CANDIDATE in "${SCRATCH:-}" "/network/scratch/${USER_NAME:0:1}/$USER_NAME" "$HOME/scratch"; do
-    if [ -n "$CANDIDATE" ] && mkdir -p "$CANDIDATE" 2>/dev/null; then
-        SCRATCH_BASE="$(cd "$CANDIDATE" && pwd)"
-        break
-    fi
-done
-
-if [ -z "$SCRATCH_BASE" ]; then
-    echo "Could not find or create a scratch directory." >&2
-    exit 1
-fi
-
-PROJECT_NAME="$(basename "$PROJECT_ROOT")"
-SCRATCH_DIR="$SCRATCH_BASE/$PROJECT_NAME"
-LOGS_DIR="$SCRATCH_DIR/logs"
 cd "$PROJECT_ROOT"
-mkdir -p "$LOGS_DIR"
 
 echo "========================================"
 echo " MMCT task submission"
@@ -72,4 +57,5 @@ echo "========================================"
 echo "All jobs submitted."
 echo "Monitor with: squeue -u $USER_NAME"
 echo "Logs in: $LOGS_DIR"
+echo "Results in: $PROJECT_ROOT"
 echo "========================================"

@@ -11,6 +11,7 @@
 #
 # Submit: sbatch scripts/jobs/train.sh <task>
 # Example: sbatch scripts/jobs/train.sh eform
+# Run from the project directory and save results in its normal output folders.
 
 set -euo pipefail
 
@@ -49,31 +50,7 @@ if [ ! -f "$RUN_DIR/data/element_properties/mat2vec.csv" ]; then
     exit 1
 fi
 
-USER_NAME="${USER:-$(whoami)}"
-SCRATCH_BASE=""
-
-for CANDIDATE in "${SCRATCH:-}" "/network/scratch/${USER_NAME:0:1}/$USER_NAME" "$HOME/scratch"; do
-    if [ -n "$CANDIDATE" ] && mkdir -p "$CANDIDATE" 2>/dev/null; then
-        SCRATCH_BASE="$(cd "$CANDIDATE" && pwd)"
-        break
-    fi
-done
-
-if [ -z "$SCRATCH_BASE" ]; then
-    echo "Could not find or create a scratch directory." >&2
-    exit 1
-fi
-
-PROJECT_NAME="$(basename "$RUN_DIR")"
-JOB_TAG="${SLURM_JOB_ID:-manual_$$}"
-RESULTS_DIR="$SCRATCH_BASE/$PROJECT_NAME/runs/${TASK}_${JOB_TAG}"
-
-mkdir -p "$RESULTS_DIR"
-RESULTS_DIR="$(cd "$RESULTS_DIR" && pwd)"
-# CrabNet reads element embeddings relative to its working directory.
-if [ ! -e "$RESULTS_DIR/data" ]; then
-    ln -s "$RUN_DIR/data" "$RESULTS_DIR/data"
-fi
+RESULTS_DIR="$RUN_DIR"
 
 cd "$RUN_DIR"
 
@@ -87,4 +64,4 @@ echo "Results: $RESULTS_DIR"
 exec "$RUN_DIR/.venv/bin/python" -u "$RUN_DIR/run.py" \
     task="$TASK" \
     "hydra.run.dir=$RESULTS_DIR" \
-    hydra.job.chdir=true
+    hydra.job.chdir=false

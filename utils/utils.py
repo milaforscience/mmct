@@ -1,7 +1,8 @@
 import os
 import gc
+from typing import Any
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 import pandas as pd
 import numpy as np
@@ -854,6 +855,12 @@ def get_expt_choices():
     return (
         hydra_cfg["task"]
     )
+
+def to_dict(cfg: Any) -> DictConfig:
+    """Convert a Hydra config to a plain Python dict."""
+    if isinstance(cfg, DictConfig):
+        cfg = OmegaConf.to_container(cfg, resolve=True)
+    return cfg
 
 # %%
 if __name__ == '__main__':

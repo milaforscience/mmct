@@ -9,7 +9,7 @@ import torch
 
 from crabnet.kingcrab import CrabNet
 from crabnet.model import Model
-from utils.utils import get_expt_choices
+from utils.utils import get_expt_choices, to_dict
 from utils.get_compute_device import get_compute_device
 
 compute_device = get_compute_device(prefer_last=False)
@@ -29,26 +29,34 @@ def get_model(task, i, cfg, batch_size=None,
     # Get the datafiles you will learn from
     # if train{fold_nuber}.csv and val{fold_number}.csv are in the same folder, then this will work
     # else load the train.csv and get the entries whose Fold column is equal to the fold_number, and do the same for val.csv
-    if os.path.exists(f'{cfg.data_dir}/{task}/train{i}.csv') and os.path.exists(f'{cfg.data_dir}/{task}/val{i}.csv'):
-        train_df = f'{cfg.data_dir}/{task}/train{i}.csv'
-        val_df = f'{cfg.data_dir}/{task}/val{i}.csv'
-    elif os.path.exists(f'{cfg.data_dir}/{task}/train_data.csv'):
-        train_data = f'{cfg.data_dir}/{task}/train_data.csv'
+    if os.path.exists(f'{cfg["task"]["data_path"]}/train{i}.csv') and os.path.exists(f'{cfg["task"]["data_path"]}/val{i}.csv'):
+        train_df = f'{cfg["task"]["data_path"]}/train{i}.csv'
+        val_df = f'{cfg["task"]["data_path"]}/val{i}.csv'
+    elif os.path.exists(f'{cfg["task"]["data_path"]}/train_data.csv'):
+        train_data = f'{cfg["task"]["data_path"]}/train_data.csv'
         train_df = pd.read_csv(train_data)
-        if os.path.exists(f'{cfg.data_dir}/{task}/val_data.csv'):
-            val_data = f'{cfg.data_dir}/{task}/val_data.csv'
+        if os.path.exists(f'{cfg["task"]["data_path"]}/val_data.csv'):
+            val_data = f'{cfg["task"]["data_path"]}/val_data.csv'
             val_df = pd.read_csv(val_data)
         else:
             # split using the split ration from config using sklearn split
-            split_ratio = cfg.val_split_ratio
-            train_df, val_df = train_test_split(train_df, test_size=split_ratio, random_state=cfg.seed)
-                        
+            split_ratio = cfg["val_split_ratio"]
+            train_df, val_df = train_test_split(train_df, test_size=split_ratio, random_state=cfg["seed"])
+
         if 'Fold' not in train_df.columns or 'Fold' not in val_df.columns:
             raise ValueError(f'Fold column not found in train.csv or val.csv for {task}. Please ensure that the Fold column is present in both files.')
         train_df = train_df[train_df['Fold'] == i]
         val_df = val_df[val_df['Fold'] == i]
+        if "Formulae" in train_df.columns:
+            # rename to formula
+            train_df = train_df.rename(columns={"Formulae": "formula", cfg["task"]["target"]: "target"})
+        if "Formulae" in val_df.columns:
+            val_df = val_df.rename(columns={"Formulae": "formula", cfg["task"]["target"]: "target"})
+        # select only formula and target columns
+        train_df = train_df[['formula', 'target']]
+        val_df = val_df[['formula', 'target']]
     else:
-        raise ValueError(f'Data files for {task} not found at {cfg.data_dir}/{task}. Please ensure that train{i}.csv and val{i}.csv or train.csv and val.csv are present in the directory.')
+        raise ValueError(f'Data files for {task} not found at {cfg["task"]["data_path"]}. Please ensure that train{i}.csv and val{i}.csv or train.csv and val.csv are present in the directory.')
 
     # Load the train and validation data before fitting the network
     data_size = train_df.shape[0] if isinstance(train_df, pd.DataFrame) else pd.read_csv(train_df).shape[0]
@@ -76,7 +84,7 @@ def to_csv(output, save_name):
     act, pred, formulae, uncertainty = output
     df = pd.DataFrame([formulae, act, pred, uncertainty]).T
     df.columns = ['formula', 'actual', 'predicted', 'uncertainty']
-    save_path = 'publication_predictions/mat2vec_matbench__predictions'
+    save_path = 'publication_predictions'
     # save_path = 'publication_predictions/onehot_matbench__predictions'
     # save_path = 'publication_predictions/random_200_matbench__predictions'
     os.makedirs(save_path, exist_ok=True)
@@ -90,8 +98,19 @@ def load_model(task, i, cfg, file_name, verbose=True):
     model.load_network(f'{task}{i}.pth')
 
     # Load the data you want to predict with
-    data = f'{cfg.data_dir}/{task}/{file_name}'
+    if not os.path.exists(f'{cfg["task"]["data_path"]}/{file_name}'):
+        file_name = 'test_data.csv'
+    data = f'{cfg["task"]["data_path"]}/{file_name}'
     # data is reloaded to model.data_loader
+    data = pd.read_csv(data)
+    if 'Fold' in data.columns:
+        data = data[data['Fold'] == i]
+        if "Formulae" in data.columns:
+            # rename to formula
+            data = data.rename(columns={"Formulae": "formula", cfg["task"]["target"]: "target"})
+        # select only formula and target columns
+        data = data[['formula', 'target']]
+    
     model.load_data(data, batch_size=2**9)
     return model
 
@@ -110,20 +129,24 @@ def save_results(task, i, cfg, file_name, verbose=True):
     print(f'\n{task}{i} mae: {mae:0.3g}')
 
     # save predictions to a csv
-    fname = f'{task}_{file_name.replace(f"{i}.csv", "")}_output_cv{i}.csv'
+    fname = f'{cfg["task"]["root"].split("/")[-1]}/{task}_{file_name.replace(f"{i}.csv", "")}_output_cv{i}.csv'
     to_csv(output, fname)
     return model, mae
 
 # run experiment for a specific task
-def run_experiment_per_task(cfg, task):
-    n_splits = cfg.n_splits
+def run_experiment(cfg, task):
+    cfg = to_dict(cfg)
+    cfg["task"]["name"] = task
+    cfg["task"]["data_path"] = cfg["task"]["src"].replace("$root", cfg["task"]["root"])
+
+    n_splits = cfg["n_splits"]
     maes = []
     for i in range(n_splits):
         print(f'property: {task}, cv {i}')
         model = get_model(task, i, cfg, verbose=True)
         print('=====================================================')
         print('calculating test mae')
-        if cfg.test:
+        if cfg["test"]:
             model_test, t_mae = save_results(task, i, cfg,
                                             f'test{i}.csv', verbose=False)
             maes.append(t_mae)
@@ -131,26 +154,14 @@ def run_experiment_per_task(cfg, task):
         print('calculating val mae')
         model_val, v_mae = save_results(task, i, cfg,
                                         f'val{i}.csv', verbose=False)
-    if cfg.test:
+    if cfg["test"]:
         print(f'Average test mae: {np.mean(maes)}')
     print('=====================================================')
-    
-# %%
-def run_experiment(cfg, task = None):
-    if task:
-        run_experiment_per_task(cfg, task)
-    else:
-        data_dir = cfg.data_dir
-        tasks = os.listdir(data_dir)
-        print(f'training: {tasks}')
-        for task in tasks:
-            # matbench provides 5 dataset train/val splits
-            run_experiment_per_task(cfg, task)
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig):
-    RNG_SEED = cfg.seed
+    RNG_SEED = cfg["seed"]
     torch.manual_seed(RNG_SEED)
     np.random.seed(RNG_SEED)
     task = get_expt_choices()

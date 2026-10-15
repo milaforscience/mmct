@@ -1,0 +1,4 @@
+root: /network/projects/crystalgfn/data/benchmark
+src: $root/matbench_mp_gap
+target: gap
+scale_lp: False

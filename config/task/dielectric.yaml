@@ -1,0 +1,4 @@
+root: /network/projects/crystalgfn/data/benchmark
+src: $root/matbench_dielectric
+target: refractive_index
+scale_lp: False

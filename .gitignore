@@ -153,3 +153,9 @@ publication_predictions/*
 
 #slurm output files
 *.out
+
+.hydra
+
+publication_predictions
+figures
+ 

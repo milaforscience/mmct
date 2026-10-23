@@ -27,7 +27,7 @@ if ! command -v sbatch >/dev/null 2>&1; then
     exit 1
 fi
 
-TASKS=(eform bandgap dielectric log_kvrh log_gvrh)
+TASKS=(eform bandgap dielectric log_kvrh log_gvrh phonons)
 for TASK in "${TASKS[@]}"; do
     if [ ! -f "$PROJECT_ROOT/config/task/$TASK.yaml" ]; then
         echo "Task configuration not found: config/task/$TASK.yaml" >&2

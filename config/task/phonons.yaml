@@ -1,4 +1,4 @@
-root: /network/projects/crystalgfn/data/benchmark
-src: $root/matbench_phonons
+root: /network/projects/crystalgfn/data/matbench_cv
+src: $root/phonons
 target: phonon_peak
 scale_lp: False

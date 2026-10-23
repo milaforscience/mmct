@@ -1,4 +1,4 @@
-root: /network/projects/crystalgfn/data/benchmark
+root: /network/projects/crystalgfn/data/matbench_cv
 src: $root/matbench_perovskites
 target: Eform
 scale_lp: False

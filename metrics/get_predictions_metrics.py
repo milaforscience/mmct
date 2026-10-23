@@ -28,83 +28,10 @@ if __name__ == '__main__':
 
 
     # %%
-    results_path = 'publication_predictions'
-    benchmark_path = 'data/benchmark_data'
-    test_directories = os.listdir(results_path)
-    benchmark_props = os.listdir(benchmark_path)
-
-    benchmark_test_directories = [test for test in test_directories if "benchmark" in test]
-
-    dataset_results = {}
-    dataset_preds = {}
-    dataset_acts = {}
-    test_maes = pd.DataFrame()
-    df_stats = pd.DataFrame()
-    for benchmark in benchmark_props:
-        df_compositions = pd.DataFrame()
-        df_preds = pd.DataFrame()
-        df_acts = pd.DataFrame()
-        models = []
-        for directory in benchmark_test_directories:
-            df_train_orig = pd.read_csv(f'{benchmark_path}/{benchmark}/train.csv',
-                                        keep_default_na=False, na_values=[''])
-            df_val = pd.read_csv(f'{benchmark_path}/{benchmark}/val.csv',
-                                 keep_default_na=False, na_values=[''])
-            df_train = pd.concat([df_train_orig, df_val], ignore_index=True)
-            df_train['formula'] = [norm_form(formula) for formula in df_train['formula']]
-            df_train.index = df_train['formula']
-            files = os.listdir(f'{results_path}\{directory}')
-            file = [file for file in files if benchmark in file and 'test' in file]
-            if len(file) > 0:
-                models.append(directory.split('_')[0])
-                file = file[0]
-                df = pd.read_csv(f'{results_path}\{directory}\{file}',
-                                 keep_default_na=False, na_values=[''])
-                composition = df['formula']
-                pred = df['predicted']
-                act = df['actual']
-                print(f'processing {benchmark} {models[-1]}')
-                df_compositions = pd.concat([df_compositions, composition], axis=1)
-                df_preds = pd.concat([df_preds, pred], axis=1)
-                df_acts = pd.concat([df_acts, act], axis=1)
-
-                n_total = act.count() + df_val.shape[0] + df_train_orig.shape[0]
-                df_stats.at[benchmark, 'mean_test'] = act.mean()
-                df_stats.at[benchmark, 'std_test'] = act.std()
-                df_stats.at[benchmark, 'n_test'] = act.count()
-
-                df_stats.at[benchmark, 'mean_train'] = df_train['target'].mean()
-                df_stats.at[benchmark, 'std_train'] = df_train['target'].std()
-                df_stats.at[benchmark, 'n_train'] = df_train_orig.shape[0]
-
-                df_stats.at[benchmark, 'n_val'] = df_val.shape[0]
-                df_stats.at[benchmark, 'n_total'] = n_total
-
-                df_stats.at[benchmark, 'prop_train'] = df_train_orig.shape[0] / n_total
-                df_stats.at[benchmark, 'prop_val'] = df_val.shape[0] / n_total
-                df_stats.at[benchmark, 'prop_test'] = act.count() / n_total
-
-        df_compositions.columns = models
-        df_preds.columns = models
-        df_acts.columns = models
-        df_diff = df_preds - df_acts
-        df_mae = df_diff.abs().mean()
-        test_maes[benchmark] = df_mae
-
-        dataset_results[benchmark] = df_compositions
-        dataset_preds[benchmark] = df_preds
-        dataset_acts[benchmark] = df_acts
-
-    maes = test_maes.T
-    model_names = ['roost', 'mat2vec', 'onehot', 'elemnet', 'rf']
-    out_1 = maes[model_names]
-    out = pd.concat([out_1, df_stats], axis=1)
-    df_benchmark = out.copy()
-
 
     # %%
     results_path = 'publication_predictions'
-    matbench_path = 'data/matbench_cv'
+    matbench_path = '/network/projects/crystalgfn/data/benchmark/'
     test_directories = os.listdir(results_path)
     matbench_props = os.listdir(matbench_path)
 
@@ -133,10 +60,12 @@ if __name__ == '__main__':
                 df_train = pd.concat([df_train_orig, df_val], ignore_index=True)
                 df_train['formula'] = [norm_form(formula) for formula in df_train['formula']]
                 df_train.index = df_train['formula']
+                files = os.listdir(f'{results_path}/{directory}')
+                file = [file for file in files if matbench in file and 'test' in file]
                 if len(file) > 0:
                     models.append(directory.split('_')[0]+f'_{i}')
                     file = file[0]
-                    df = pd.read_csv(f'{results_path}\{directory}\{test_file}',
+                    df = pd.read_csv(f'{results_path}/{directory}/{test_file}',
                                      keep_default_na=False, na_values=[''])
                     df.index = df['formula'].values
                     composition = df['formula']
@@ -180,14 +109,14 @@ if __name__ == '__main__':
         dataset_acts[matbench] = df_acts
 
     maes = test_maes.T
-    model_names = ['roost', 'mat2vec', 'onehot', 'elemnet', 'rf']
+    model_names = ['mat2vec']
     out_1 = maes[model_names]
     out = pd.concat([out_1, df_stats], axis=1)
     df_matbench = out.copy()
 
 
     # %%
-    df_all = pd.concat([df_benchmark, df_matbench], axis=0, ignore_index=False)
+    df_all = pd.concat([df_matbench], axis=0, ignore_index=False)
 
     rename_dict = {'mat2vec': 'crabnet', 'onehot': 'hotcrab'}
     df_all = df_all.rename(columns=rename_dict)

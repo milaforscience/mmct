@@ -158,4 +158,7 @@ publication_predictions/*
 
 publication_predictions
 figures
+
+*.csv
+*.txt
  

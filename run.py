@@ -1,4 +1,6 @@
 import os
+import fcntl
+import json
 import hydra
 import numpy as np
 from omegaconf import DictConfig
@@ -84,11 +86,11 @@ def to_csv(output, save_name):
     act, pred, formulae, uncertainty = output
     df = pd.DataFrame([formulae, act, pred, uncertainty]).T
     df.columns = ['formula', 'actual', 'predicted', 'uncertainty']
-    save_path = 'publication_predictions'
+    save_path = f'publication_predictions/{save_name}'
     # save_path = 'publication_predictions/onehot_matbench__predictions'
     # save_path = 'publication_predictions/random_200_matbench__predictions'
-    os.makedirs(save_path, exist_ok=True)
-    df.to_csv(f'{save_path}/{save_name}', index_label='Index')
+    os.makedirs("/".join(save_path.split("/")[:-1]), exist_ok=True)
+    df.to_csv(save_path, index_label='Index')
 
 
 def load_model(task, i, cfg, file_name, verbose=True):
@@ -155,7 +157,26 @@ def run_experiment(cfg, task):
         model_val, v_mae = save_results(task, i, cfg,
                                         f'val{i}.csv', verbose=False)
     if cfg["test"]:
-        print(f'Average test mae: {np.mean(maes)}')
+        avg_test_mae = float(np.mean(maes))
+        std_test_mae = float(np.std(maes))
+        print(f'Average test mae: {avg_test_mae}')
+        results_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'{cfg["task"]["root"].split("/")[-1]}_test.txt')
+        # Keep parallel task runs from overwriting each other's results.
+        with open(results_path, 'a+', encoding='utf-8') as results_file:
+            try:
+                fcntl.flock(results_file.fileno(), fcntl.LOCK_EX)
+                results_file.seek(0)
+                contents = results_file.read()
+                results = json.loads(contents) if contents.strip() else {}
+                results[task] = f"{avg_test_mae} ± {std_test_mae}"
+                updated_results = json.dumps(results, indent=4, ensure_ascii=False) + '\n'
+                results_file.truncate(0)
+                print(f"Saving results to {results_path}: {updated_results.strip()}")
+                results_file.write(updated_results)
+            except BlockingIOError:
+                print(f"Could not acquire lock on {results_path}. Results may not be saved correctly.")
+            finally:
+                fcntl.flock(results_file.fileno(), fcntl.LOCK_UN)
     print('=====================================================')
 
 

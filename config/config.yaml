@@ -1,5 +1,6 @@
 defaults:
   - task: eform
+  - model: mmct_base
   - _self_
 
 n_splits: 5

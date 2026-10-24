@@ -853,6 +853,7 @@ def get_expt_choices():
     hydra_cfg = OmegaConf.to_container(hydra_cfg.runtime.choices)
 
     return (
+        hydra_cfg["model"],
         hydra_cfg["task"]
     )
 

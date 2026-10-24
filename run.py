@@ -20,8 +20,11 @@ compute_device = get_compute_device(prefer_last=False)
 def get_model(task, i, cfg, batch_size=None,
               transfer=None, verbose=True):
     # Get the TorchedCrabNet architecture loaded
-    model = Model(CrabNet(compute_device=compute_device).to(compute_device),
-                  model_name=f'{task}{i}', verbose=verbose)
+    model_name = f'{cfg["model"]["name"]}{task}{i}'
+    model = Model(CrabNet(compute_device=compute_device, **cfg["model"]["arch"]).to(compute_device),
+                  model_name=model_name, 
+                  **cfg["model"]["misc"]
+                  )
 
     # Train network starting at pretrained weights
     if transfer is not None:
@@ -74,10 +77,10 @@ def get_model(task, i, cfg, batch_size=None,
     model.load_data(val_df, batch_size=batch_size)
 
     # Set the number of epochs, decide if you want a loss curve to be plotted
-    model.fit(epochs=300, losscurve=True)
+    model.fit(epochs=cfg["model"]["optim"]["epochs"], losscurve=cfg["model"]["optim"]["losscurve"])
 
     # Save the network (saved as f"{model_name}.pth")
-    model.save_network()
+    model.save_network(model_name)
     return model
 
 
@@ -87,17 +90,18 @@ def to_csv(output, save_name):
     df = pd.DataFrame([formulae, act, pred, uncertainty]).T
     df.columns = ['formula', 'actual', 'predicted', 'uncertainty']
     save_path = f'publication_predictions/{save_name}'
-    # save_path = 'publication_predictions/onehot_matbench__predictions'
-    # save_path = 'publication_predictions/random_200_matbench__predictions'
     os.makedirs("/".join(save_path.split("/")[:-1]), exist_ok=True)
     df.to_csv(save_path, index_label='Index')
 
 
 def load_model(task, i, cfg, file_name, verbose=True):
     # Load up a saved network.
-    model = Model(CrabNet(compute_device=compute_device).to(compute_device),
-                  model_name=f'{task}{i}', verbose=verbose)
-    model.load_network(f'{task}{i}.pth')
+    model_name = f'{cfg["model"]["name"]}{task}{i}'
+    model = Model(CrabNet(compute_device=compute_device, **cfg["model"]["arch"]).to(compute_device),
+                  model_name=model_name, 
+                  **cfg["model"]["misc"]
+            )
+    model.load_network(f'{model_name}.pth')
 
     # Load the data you want to predict with
     if not os.path.exists(f'{cfg["task"]["data_path"]}/{file_name}'):
@@ -136,10 +140,11 @@ def save_results(task, i, cfg, file_name, verbose=True):
     return model, mae
 
 # run experiment for a specific task
-def run_experiment(cfg, task):
+def run_experiment(cfg, model, task):
     cfg = to_dict(cfg)
     cfg["task"]["name"] = task
     cfg["task"]["data_path"] = cfg["task"]["src"].replace("$root", cfg["task"]["root"])
+    cfg["model"]["name"] = model
 
     n_splits = cfg["n_splits"]
     maes = []
@@ -185,8 +190,8 @@ def main(cfg: DictConfig):
     RNG_SEED = cfg["seed"]
     torch.manual_seed(RNG_SEED)
     np.random.seed(RNG_SEED)
-    task = get_expt_choices()
-    run_experiment(cfg, task)
+    model, task = get_expt_choices()
+    run_experiment(cfg, model, task)
 
 
 if __name__ == "__main__":

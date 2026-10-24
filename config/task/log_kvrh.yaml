@@ -1,4 +1,4 @@
-root: /network/projects/crystalgfn/data/matbench_cv
-src: $root/log_kvrh
+root: /network/projects/crystalgfn/data/benchmark
+src: $root/matbench_log_kvrh
 target: log_kvrh
 scale_lp: False

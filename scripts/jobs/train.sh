@@ -45,8 +45,8 @@ if [ ! -x "$RUN_DIR/.venv/bin/python" ]; then
     exit 1
 fi
 
-if [ ! -f "$RUN_DIR/data/element_properties/mat2vec.csv" ]; then
-    echo "Element embeddings not found at: $RUN_DIR/data/element_properties/mat2vec.csv" >&2
+if [ ! -f "$RUN_DIR/mmct/data/element_properties/mat2vec.csv" ]; then
+    echo "Element embeddings not found at: $RUN_DIR/mmct/data/element_properties/mat2vec.csv" >&2
     exit 1
 fi
 

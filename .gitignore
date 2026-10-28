@@ -146,3 +146,19 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# hydra outputs
+outputs
+publication_predictions/*
+
+#slurm output files
+*.out
+
+.hydra
+
+publication_predictions
+figures
+
+*.csv
+*.txt
+ 

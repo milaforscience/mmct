@@ -1,0 +1,15 @@
+arch:
+  out_dims: 3
+  d_model: 512
+  N: 3
+  heads: 4
+  residual_nn: 'roost'
+optim:
+  losscurve: true
+  epochs: 300
+misc:
+  n_elements: 'infer'
+  capture_every: null
+  verbose: True
+  drop_unary: True
+  scale: True

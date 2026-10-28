@@ -1,0 +1,9 @@
+defaults:
+  - task: eform
+  - model: mmct_base
+  - _self_
+
+n_splits: 5
+test: true
+seed: 12345
+val_split_ratio: 0.2

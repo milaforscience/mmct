@@ -72,15 +72,16 @@ The element-property tables used by the model are in
 
 ## Run training
 
-Run from the repository root. The working directory is set to `mmct/` so the
-model can find the element-property tables at `data/element_properties/`.
-Hydra configuration files are loaded from the repository's `config/` folder.
+Run from the repository root. The model loads element-property tables relative
+to its source files in `mmct/data/element_properties/`, so the command does not
+depend on a special working directory. Hydra configuration files are loaded
+from the repository's `config/` folder.
 
 For example, to train the default eform task using the configured benchmark
 path:
 
 ```bash
-uv run --directory mmct python ../run.py \
+uv run python run.py \
   task=eform model=mmct_base hydra.job.chdir=false
 ```
 
@@ -88,7 +89,7 @@ To use a local data directory, override the task paths. This example expects
 the CSVs under `/datasets/benchmark/matbench_mp_e_form/`:
 
 ```bash
-uv run --directory mmct python ../run.py \
+uv run python run.py \
   task=eform \
   model=mmct_base \
   task.root=/datasets/benchmark \
@@ -101,8 +102,8 @@ rather than positional arguments. To inspect available config choices and
 resolved defaults:
 
 ```bash
-uv run --directory mmct python ../run.py --help
-uv run --directory mmct python ../run.py --cfg job
+uv run python run.py --help
+uv run python run.py --cfg job
 ```
 
 Available task configs are `eform`, `bandgap`, `dielectric`, `log_kvrh`,
@@ -127,7 +128,7 @@ Common overrides include:
 For a shorter local run, for example:
 
 ```bash
-uv run --directory mmct python ../run.py \
+uv run python run.py \
   task=eform model=mmct_base \
   task.root=/datasets/benchmark \
   'task.src=$root/matbench_mp_e_form' \
@@ -135,13 +136,13 @@ uv run --directory mmct python ../run.py \
   model.optim.losscurve=false hydra.job.chdir=false
 ```
 
-The model saves checkpoints under `mmct/models/trained_models/`. Prediction
-CSVs and training figures are written under the `mmct/` working directory; the
-test summary is written next to `run.py`. Create the checkpoint directory
-before training if it does not exist:
+The model saves checkpoints under `models/trained_models/`. Prediction CSVs
+and training figures are written relative to the repository root; the test
+summary is written next to `run.py`. Create the checkpoint directory before
+training if it does not exist:
 
 ```bash
-mkdir -p mmct/models/trained_models
+mkdir -p models/trained_models
 ```
 
 ## Tests
@@ -161,7 +162,5 @@ synthetic inputs and do not need benchmark datasets or a GPU.
 
 The repository includes `scripts/jobs/train.sh` for one task and
 `scripts/jobs/run_all_tasks.sh` for the configured task set. They require Slurm
-(`sbatch`) and the project `.venv`. The single-task wrapper also checks for
-`data/element_properties/mat2vec.csv` at the repository root; the bundled copy
-is currently under `mmct/data/element_properties/`, so copy or link that data
-directory to the path the wrapper expects before using these scripts.
+(`sbatch`), the project `.venv`, and data available at the paths expected by
+the selected task configs.

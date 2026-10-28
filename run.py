@@ -9,10 +9,10 @@ from sklearn.model_selection import train_test_split
 import torch
 
 
-from crabnet.kingcrab import CrabNet
-from crabnet.model import Model
-from utils.utils import get_expt_choices, to_dict
-from utils.get_compute_device import get_compute_device
+from mmct.models.kingcrab import CrabNet
+from mmct.models.model import Model
+from mmct.utils.utils import get_expt_choices, to_dict
+from mmct.utils.get_compute_device import get_compute_device
 
 compute_device = get_compute_device(prefer_last=False)
 

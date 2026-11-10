@@ -8,9 +8,12 @@ from sklearn.metrics import mean_absolute_error, roc_auc_score
 
 import torch
 from torch.optim.lr_scheduler import CyclicLR
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
+import wandb
 
 from mmct.utils.utils import (Lamb, Lookahead, RobustL1, BCEWithLogitsLoss,
-                         EDM_CsvLoader, Scaler, DummyScaler, count_parameters)
+                         EDM_CsvLoader, Scaler, DummyScaler, count_parameters, log_wandb_metrics, rank_zero_debug, rank_zero_info)
 from mmct.utils.get_compute_device import get_compute_device
 from mmct.utils.optim import SWA
 
@@ -26,6 +29,8 @@ data_type_torch = torch.float32
 class Model():
     def __init__(self,
                  model,
+                 fabric,
+                 cfg,
                  model_name='UnnamedModel',
                  n_elements='infer',
                  capture_every=None,
@@ -34,6 +39,8 @@ class Model():
                  scale=True):
         self.model = model
         self.model_name = model_name
+        self.fabric = fabric
+        self.cfg = cfg
         self.data_loader = None
         self.train_loader = None
         self.classification = False
@@ -50,14 +57,15 @@ class Model():
         self.formula_current = None
         self.act_v = None
         self.pred_v = None
+        self._log_prefix = f"fold_{self.model_name.split('_')[-1]}"
         if self.verbose:
-            print('\nModel architecture: out_dims, d_model, N, heads')
-            print(f'{self.model.out_dims}, {self.model.d_model}, '
+            rank_zero_debug('\nModel architecture: out_dims, d_model, N, heads')
+            rank_zero_debug(f'{self.model.out_dims}, {self.model.d_model}, '
                   f'{self.model.N}, {self.model.heads}')
-            print(f'Running on compute device: {self.compute_device}')
-            print(f'Model size: {count_parameters(self.model)} parameters\n')
+            rank_zero_debug(f'Running on compute device: {self.compute_device}')
+            rank_zero_debug(f'Model size: {count_parameters(self.model)} parameters\n')
         if self.capture_every is not None:
-            print(f'capturing attention tensors every {self.capture_every}')
+            rank_zero_debug(f'capturing attention tensors every {self.capture_every}')
 
     def load_data(self, file_name, batch_size=2**9, train=False):
         self.batch_size = batch_size
@@ -69,7 +77,7 @@ class Model():
                                      verbose=self.verbose,
                                      drop_unary=self.drop_unary,
                                      scale=self.scale)
-        print(f'loading data with up to {data_loaders.n_elements:0.0f} '
+        rank_zero_debug(f'loading data with up to {data_loaders.n_elements:0.0f} '
               f'elements in the formula')
 
         # update n_elements after loading dataset
@@ -88,10 +96,13 @@ class Model():
 
 
     def train(self):
+        
         self.model.train()
         ti = time()
         minima = []
         for i, data in enumerate(self.train_loader):
+            self.step_count += 1
+            log_wandb_metrics(self.fabric, {f"{self._log_prefix}/step": self.step_count}, step=self.step_count)
             X, y, formula = data
             y = self.scaler.scale(y)
             src, frac = X.squeeze(-1).chunk(2, dim=1)
@@ -132,7 +143,9 @@ class Model():
                                   uncertainty.view(-1),
                                   y.view(-1))
 
-            loss.backward()
+            self.fabric.backward(loss)
+            log_wandb_metrics(self.fabric, {f"{self._log_prefix}/train/loss": loss.item()}, step=self.step_count)
+            # loss.backward()
             self.optimizer.step()
             self.optimizer.zero_grad()
             if self.stepping:
@@ -150,13 +163,13 @@ class Model():
 
         if learning_time and not any(minima):
             self.optimizer.discard_count += 1
-            print(f'Epoch {self.epoch} failed to improve.')
-            print(f'Discarded: {self.optimizer.discard_count}/'
-                  f'{self.discard_n} weight updates ♻🗑️')
+            rank_zero_debug(f'Epoch {self.epoch} failed to improve.')
+            rank_zero_debug(f'Discarded: {self.optimizer.discard_count}/'
+                           f'{self.discard_n} weight updates ♻🗑️')
 
         dt = time() - ti
         datalen = len(self.train_loader.dataset)
-        # print(f'training speed: {datalen/dt:0.3f}')
+        rank_zero_debug(f'training speed: {datalen/dt:0.3f}')
 
 
     def fit(self, epochs=None, checkin=None, losscurve=False):
@@ -172,19 +185,18 @@ class Model():
         # self.epochs_step = 10
         self.epochs_step = 1
         self.step_size = self.epochs_step * len(self.train_loader)
-        print(f'stepping every {self.step_size} training passes,',
-              f'cycling lr every {self.epochs_step} epochs')
+        rank_zero_debug(f"stepping every {self.step_size} training passes, cycling lr every {self.epochs_step} epochs")
         if epochs is None:
             n_iterations = 1e4
             epochs = int(n_iterations / len(self.data_loader))
-            print(f'running for {epochs} epochs')
+            rank_zero_debug(f'running for {epochs} epochs')
         if checkin is None:
             checkin = self.epochs_step * 2
-            print(f'checkin at {self.epochs_step*2} '
-                  f'epochs to match lr scheduler')
+            rank_zero_debug(f'checkin at {self.epochs_step*2} '
+                           f'epochs to match lr scheduler')
         if epochs % (self.epochs_step * 2) != 0:
             # updated_epochs = epochs - epochs % (self.epochs_step * 2)
-            # print(f'epochs not divisible by {self.epochs_step * 2}, '
+            # rank_zero_info(f'epochs not divisible by {self.epochs_step * 2}, '
             #       f'updating epochs to {updated_epochs} for learning')
             updated_epochs = epochs
             epochs = updated_epochs
@@ -192,11 +204,16 @@ class Model():
         self.step_count = 0
         self.criterion = RobustL1
         if self.classification:
-            print("Using BCE loss for classification task")
+            rank_zero_info("Using BCE loss for classification task")
             self.criterion = BCEWithLogitsLoss
+            
         base_optim = Lamb(params=self.model.parameters())
         optimizer = Lookahead(base_optimizer=base_optim)
-        self.optimizer = SWA(optimizer)
+        optimizer = SWA(optimizer)
+
+        self.model, self.optimizer = self.fabric.setup(self.model, optimizer)
+        self.train_loader = self.fabric.setup_dataloaders(self.train_loader)
+        self.data_loader = self.fabric.setup_dataloaders(self.data_loader)
 
         lr_scheduler = CyclicLR(self.optimizer,
                                 base_lr=1e-4,
@@ -211,112 +228,143 @@ class Model():
         self.xswa = []
         self.yswa = []
         self.discard_n = 3
-
-        for epoch in range(epochs):
-            self.epoch = epoch
-            self.epochs = epochs
-            ti = time()
-            self.train()
-            # print(f'epoch time: {(time() - ti):0.3f}')
-            self.lr_list.append(self.optimizer.param_groups[0]['lr'])
-
-            ##################################
-            # Force evaluate dataset so that we can capture it in the hook
-            # here we are using the train_loader, but we can also use
-            # general data_loader
-            if self.capture_every == 'epoch':
-                # print('capturing every epoch!')
-                # print(f'data_loader size: {len(self.data_loader.dataset)}')
-                self.capture_flag = True
-                # (act, pred, formulae, uncert)
-                self.act_v, self.pred_v, _, _ = self.predict(self.data_loader)
-                self.capture_flag = False
-            ##################################
-
-            if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
+        pbar = tqdm(range(epochs), position=0, leave=True, desc='Training')
+        with logging_redirect_tqdm():
+            for epoch in pbar:
+                epoch = int(epoch)
+                self.epoch = epoch
+                log_wandb_metrics(self.fabric, {f"{self._log_prefix}/epoch": self.epoch}, step=self.step_count)
+                self.epochs = epochs
                 ti = time()
-                with torch.no_grad():
-                    act_t, pred_t, _, _ = self.predict(self.train_loader)
-                dt = time() - ti
-                datasize = len(act_t)
-                # print(f'inference speed: {datasize/dt:0.3f}')
-                mae_t = mean_absolute_error(act_t, pred_t)
-                self.loss_curve['train'].append(mae_t)
-                with torch.no_grad():
-                    act_v, pred_v, _, _ = self.predict(self.data_loader)
-                mae_v = mean_absolute_error(act_v, pred_v)
-                self.loss_curve['val'].append(mae_v)
-                epoch_str = f'Epoch: {epoch}/{epochs} ---'
-                train_str = f'train mae: {self.loss_curve["train"][-1]:0.3g}'
-                val_str = f'val mae: {self.loss_curve["val"][-1]:0.3g}'
-                if self.classification:
-                    train_auc = roc_auc_score(act_t, pred_t)
-                    val_auc = roc_auc_score(act_v, pred_v)
-                    train_str = f'train auc: {train_auc:0.3f}'
-                    val_str = f'val auc: {val_auc:0.3f}'
-                print(epoch_str, train_str, val_str)
+                self.train()
+                # pbar.update(1)
+                # print(f'epoch time: {(time() - ti):0.3f}')
+                rank_zero_debug(f'Learning rate: {self.optimizer.param_groups[0]["lr"]}')
+                self.lr_list.append(self.optimizer.param_groups[0]['lr'])
 
-                if self.epoch >= (self.epochs_step * self.swa_start - 1):
-                    if (self.epoch+1) % (self.epochs_step * 2) == 0:
-                        self.xswa.append(self.epoch)
-                        self.yswa.append(mae_v)
 
-                if losscurve:
+                ##################################
+                # Force evaluate dataset so that we can capture it in the hook
+                # here we are using the train_loader, but we can also use
+                # general data_loader
+                if self.capture_every == 'epoch':
+                    # print('capturing every epoch!')
+                    # print(f'data_loader size: {len(self.data_loader.dataset)}')
+                    self.capture_flag = True
+                    # (act, pred, formulae, uncert)
+                    self.act_v, self.pred_v, _, _ = self.predict(self.data_loader)
+                    self.capture_flag = False
+                ##################################
+
+                if (epoch+1) % checkin == 0 or epoch == epochs - 1 or epoch == 0:
+                    ti = time()
+                    with torch.no_grad():
+                        act_t, pred_t, _, _ = self.predict(self.train_loader)
+                    dt = time() - ti
+                    datasize = len(act_t)
+                    # print(f'inference speed: {datasize/dt:0.3f}')
+                    mae_t = mean_absolute_error(act_t, pred_t)
+                    self.loss_curve['train'].append(mae_t)
+                    with torch.no_grad():
+                        act_v, pred_v, _, _ = self.predict(self.data_loader)
+                    mae_v = mean_absolute_error(act_v, pred_v)
+                    self.loss_curve['val'].append(mae_v)
+                    log_wandb_metrics(self.fabric, 
+                                    {f"{self._log_prefix}/train/MAE_epoch": mae_t,
+                                        f"{self._log_prefix}/val/MAE_epoch": mae_v},
+                                        step = self.epoch
+                                )
+                    pbar.set_postfix_str(f"Epoch: {epoch}/{epochs} --- "
+                                        f"train mae: {mae_t:0.3g} --- "
+                                        f"val mae: {mae_v:0.3g}")
+                    epoch_str = f'Epoch: {epoch}/{epochs} ---'
+                    train_str = f'train mae: {self.loss_curve["train"][-1]:0.3g}'
+                    val_str = f'val mae: {self.loss_curve["val"][-1]:0.3g}'
+                    if self.classification:
+                        train_auc = roc_auc_score(act_t, pred_t)
+                        val_auc = roc_auc_score(act_v, pred_v)
+                        train_str = f'train auc: {train_auc:0.3f}'
+                        val_str = f'val auc: {val_auc:0.3f}'
+                    rank_zero_debug(f'{epoch_str} {train_str} {val_str}')
+
+                    if self.epoch >= (self.epochs_step * self.swa_start - 1):
+                        if (self.epoch+1) % (self.epochs_step * 2) == 0:
+                            self.xswa.append(self.epoch)
+                            self.yswa.append(mae_v)
+                            log_wandb_metrics(self.fabric,
+                                                    {f"{self._log_prefix}/SWA": mae_v},
+                                                    step = self.epoch
+                                                )
+                
+                    if losscurve:
+                        xval = np.arange(len(self.loss_curve['val'])) * checkin - 1
+                        plt.figure(figsize=(8, 5))
+                        xval[0] = 0
+                        plt.plot(xval, self.loss_curve['train'],
+                                'o-', label='train_mae')
+                        plt.plot(xval, self.loss_curve['val'],
+                                's--', label='val_mae')
+                        plt.plot(self.xswa, self.yswa,
+                                'o', ms=12, mfc='none', label='SWA point')
+                        plt.ylim(0, 2 * np.mean(self.loss_curve['val']))
+                        plt.title(f'{self.model_name}')
+                        plt.xlabel('epochs')
+                        plt.ylabel('MAE')
+                        plt.legend()
+                        # plt.show()
+                    
+                if (epoch == epochs-1 or
+                    self.optimizer.discard_count >= self.discard_n):
+                    # save output df for stats tracking
+                    xval = np.arange(len(self.loss_curve['val'])) * checkin - 1
+                    xval[0] = 0
+                    tval = self.loss_curve['train']
+                    vval = self.loss_curve['val']
+                    df_loss = pd.DataFrame([xval, tval, vval]).T
+                    df_loss.columns = ['epoch', 'train loss', 'val loss']
+                    df_loss['swa'] = ['n'] * len(xval)
+                    df_loss.loc[df_loss['epoch'].isin(self.xswa), 'swa'] = 'y'
+                    if self.cfg['logger']['type'] == 'debug':
+                        os.makedirs('figures/lc_data', exist_ok=True)
+                        df_loss.to_csv(f'figures/lc_data/{self.model_name}_lc.csv',
+                                    index=False)
+                    df_loss_table = wandb.Table(dataframe=df_loss)
+                    log_wandb_metrics(self.fabric, {f"{self._log_prefix}/loss_table": df_loss_table})
+
+
+                    # save output learning curve plot
                     plt.figure(figsize=(8, 5))
                     xval = np.arange(len(self.loss_curve['val'])) * checkin - 1
                     xval[0] = 0
                     plt.plot(xval, self.loss_curve['train'],
-                             'o-', label='train_mae')
-                    plt.plot(xval, self.loss_curve['val'],
-                             's--', label='val_mae')
-                    plt.plot(self.xswa, self.yswa,
-                             'o', ms=12, mfc='none', label='SWA point')
+                            'o-', label='train_mae')
+                    plt.plot(xval, self.loss_curve['val'], 's--', label='val_mae')
+                    if self.epoch >= (self.epochs_step * self.swa_start - 1):
+                        plt.plot(self.xswa, self.yswa,
+                                'o', ms=12, mfc='none', label='SWA point')
                     plt.ylim(0, 2 * np.mean(self.loss_curve['val']))
                     plt.title(f'{self.model_name}')
                     plt.xlabel('epochs')
                     plt.ylabel('MAE')
                     plt.legend()
-                    plt.show()
+                    log_wandb_metrics(self.fabric, {f"{self._log_prefix}/loss_curve": wandb.Image(plt)})
+                    if self.cfg["logger"]["type"] == "debug":
+                        plt.savefig(f'figures/lc_data/{self.model_name}_lc.png')
 
-            if (epoch == epochs-1 or
-                self.optimizer.discard_count >= self.discard_n):
-                # save output df for stats tracking
-                xval = np.arange(len(self.loss_curve['val'])) * checkin - 1
-                xval[0] = 0
-                tval = self.loss_curve['train']
-                vval = self.loss_curve['val']
-                os.makedirs('figures/lc_data', exist_ok=True)
-                df_loss = pd.DataFrame([xval, tval, vval]).T
-                df_loss.columns = ['epoch', 'train loss', 'val loss']
-                df_loss['swa'] = ['n'] * len(xval)
-                df_loss.loc[df_loss['epoch'].isin(self.xswa), 'swa'] = 'y'
-                df_loss.to_csv(f'figures/lc_data/{self.model_name}_lc.csv',
-                               index=False)
+                if self.cfg['model']['optim']['early_stopping'] and self.optimizer.discard_count >= self.discard_n:
+                    rank_zero_debug(f'Discarded: {self.optimizer.discard_count}/'
+                        f'{self.discard_n} weight updates, '
+                        f'early-stopping now 🙅🛑')
+                    self.optimizer.swap_swa_sgd()
+                    break
 
-                # save output learning curve plot
-                plt.figure(figsize=(8, 5))
-                xval = np.arange(len(self.loss_curve['val'])) * checkin - 1
-                xval[0] = 0
-                plt.plot(xval, self.loss_curve['train'],
-                         'o-', label='train_mae')
-                plt.plot(xval, self.loss_curve['val'], 's--', label='val_mae')
-                if self.epoch >= (self.epochs_step * self.swa_start - 1):
-                    plt.plot(self.xswa, self.yswa,
-                             'o', ms=12, mfc='none', label='SWA point')
-                plt.ylim(0, 2 * np.mean(self.loss_curve['val']))
-                plt.title(f'{self.model_name}')
-                plt.xlabel('epochs')
-                plt.ylabel('MAE')
-                plt.legend()
-                plt.savefig(f'figures/lc_data/{self.model_name}_lc.png')
 
-            if self.optimizer.discard_count >= self.discard_n:
-                print(f'Discarded: {self.optimizer.discard_count}/'
-                      f'{self.discard_n} weight updates, '
-                      f'early-stopping now 🙅🛑')
-                self.optimizer.swap_swa_sgd()
-                break
-
+        # log all lrs in list
+        for idx in range(len(self.lr_list)):
+            log_wandb_metrics(self.fabric,
+                {f"{self._log_prefix}/lr": self.lr_list[idx]},
+                step=idx
+            )
         if not (self.optimizer.discard_count >= self.discard_n):
             self.optimizer.swap_swa_sgd()
 
@@ -379,10 +427,10 @@ class Model():
             model_name = self.model_name
             os.makedirs('models/trained_models', exist_ok=True)
             path = f'models/trained_models/{model_name}.pth'
-            print(f'Saving network ({model_name}) to {path}')
+            rank_zero_debug(f'Saving network ({model_name}) to {path}')
         else:
             path = f'models/trained_models/{model_name}.pth'
-            print(f'Saving checkpoint ({model_name}) to {path}')
+            rank_zero_debug(f'Saving checkpoint ({model_name}) to {path}')
 
         save_dict = {'weights': self.model.state_dict(),
                      'scaler_state': self.scaler.state_dict(),

@@ -159,7 +159,7 @@ class Encoder(nn.Module):
                                                        dim_feedforward=2048,
                                                        dropout=0.1)
             self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
-                                                             num_layers=self.N)
+                                                             num_layers=self.N, enable_nested_tensor=False)
 
     def forward(self, src, frac):
         x = self.embed(src) * 2**self.emb_scaler

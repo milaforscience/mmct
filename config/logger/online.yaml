@@ -1,0 +1,8 @@
+user: alex-hg
+project: mmct
+name: null
+group: experiment
+metrics:
+  - None
+  - None
+results: ${oc.env:SCRATCH,/tmp}/mmct/runs

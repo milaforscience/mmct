@@ -6,10 +6,10 @@ arch:
   residual_nn: 'roost'
 optim:
   losscurve: true
+  early_stopping: True
   epochs: 300
 misc:
   n_elements: 'infer'
   capture_every: null
-  verbose: True
   drop_unary: True
   scale: True

@@ -1,6 +1,7 @@
 defaults:
-  - task: eform
+  - task: dielectric
   - model: mmct_base
+  - logger: online
   - _self_
 
 n_splits: 5

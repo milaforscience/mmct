@@ -1,6 +1,9 @@
+import logging
 import os
 import gc
-from typing import Any
+from pathlib import Path
+import sys
+from typing import Any, Dict, Optional, Union
 
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -16,11 +19,14 @@ from torch.optim.optimizer import Optimizer
 from torch.utils.data import Dataset, DataLoader
 from torch import nn
 
-from mmct.utils.composition import generate_features, _element_composition
 
 from sklearn.preprocessing import StandardScaler, Normalizer
-
+from lightning.pytorch.loggers import CSVLogger, WandbLogger
+from lightning.pytorch.loggers.logger import DummyLogger
+from lightning.fabric.utilities.rank_zero import rank_zero_only
 import json
+
+from mmct.utils.composition import generate_features, _element_composition
 
 plt.rcParams.update({'font.size': 16})
 
@@ -33,6 +39,8 @@ fig_dir = r'figures/Classics/'
 data_type_torch = torch.float32
 data_type_np = np.float32
 
+LOG = logging.getLogger("crys_former")
+ROOT = Path(__file__).parent.parent.parent
 
 # %%
 def get_obj_size(obj):
@@ -636,6 +644,88 @@ class EDM_CsvLoader():
         return pred_loader
 
 
+def setup_logging(level: int = logging.INFO, force: bool = False) -> None:
+    """Configure the Python logging system for this project."""
+    if force or not logging.root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            handlers=[logging.StreamHandler(sys.stdout)],
+            force=force,
+        )
+    LOG.setLevel(level)
+
+
+def get_logger(name: Optional[str] = None) -> logging.Logger:
+    """Return a project logger, optionally namespaced under mmct."""
+    if name:
+        return logging.getLogger(f"mmct.{name}")
+    return LOG
+
+
+def build_logger(
+    log_cfg: Dict,
+    experiment = None,
+    log_model: bool = False,
+    **kwargs
+) -> Union[WandbLogger, CSVLogger]:
+    """
+    Instantiate the appropriate logger (WandbLogger or CSVLogger) based on config.
+
+    Args:
+        log_cfg (dict): Logger configuration containing type, name, project, user, etc.
+        experiment: Existing wandb.Run to attach to. When provided, the returned
+            WandbLogger is a fresh wrapper around that same run.
+
+    Returns:
+        WandbLogger or CSVLogger: Logger object for use in PyTorch Lightning.
+    """
+    name = log_cfg.get("name", None)
+    if log_cfg["type"] == "online":
+        logObj = WandbLogger(
+            project=log_cfg["project"],
+            group=log_cfg["group"],
+            name=name,
+            entity=log_cfg["user"],
+            save_dir=log_cfg["results"],
+            experiment=experiment,
+            log_model="all" if log_model else False,
+            **kwargs
+        )
+    elif log_cfg["type"] == "debug":
+        logObj = CSVLogger(log_cfg["results"], name=name)
+    else:
+        raise ValueError(f"{log_cfg['type']} logger not available")
+
+    return logObj
+
+
+@rank_zero_only
+def rank_zero_info(*args, **kwargs):
+    LOG.info(*args, **kwargs)
+
+
+@rank_zero_only
+def rank_zero_debug(*args, **kwargs):
+    LOG.debug(*args, **kwargs)
+
+
+@rank_zero_only
+def log_wandb_metrics(log_target, metrics: dict, step: Optional[int] = None):
+    if log_target is None:
+        return
+    elif hasattr(log_target, "experiment") and hasattr(log_target.experiment, "log"):
+        log_target.experiment.log(metrics, step=step)
+    else:
+        log_target.log_dict(metrics, step=step)
+
+
+def checkpoint_saving_enabled(cfg: DictConfig) -> bool:
+    """Return whether this run should create Lightning checkpoints."""
+    return bool(cfg.get("save_model", False)) and not bool(cfg.get("test", False))
+
+
+
 # %%
 class Lamb(Optimizer):
     r"""Implements Lamb algorithm.
@@ -854,7 +944,8 @@ def get_expt_choices():
 
     return (
         hydra_cfg["model"],
-        hydra_cfg["task"]
+        hydra_cfg["task"],
+        hydra_cfg["logger"]
     )
 
 def to_dict(cfg: Any) -> DictConfig:

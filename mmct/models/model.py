@@ -14,7 +14,6 @@ import wandb
 
 from mmct.utils.utils import (Lamb, Lookahead, RobustL1, BCEWithLogitsLoss,
                          EDM_CsvLoader, Scaler, DummyScaler, count_parameters, log_wandb_metrics, rank_zero_debug, rank_zero_info)
-from mmct.utils.get_compute_device import get_compute_device
 from mmct.utils.optim import SWA
 
 
@@ -32,11 +31,7 @@ class Model():
                  fabric,
                  cfg,
                  model_name='UnnamedModel',
-                 n_elements='infer',
-                 capture_every=None,
-                 verbose=True,
-                 drop_unary=True,
-                 scale=True):
+                 **kwargs):
         self.model = model
         self.model_name = model_name
         self.fabric = fabric
@@ -44,15 +39,12 @@ class Model():
         self.data_loader = None
         self.train_loader = None
         self.classification = False
-        self.n_elements = n_elements
-        self.compute_device = model.compute_device
+        self.n_elements = cfg['model']['misc'].get('n_elements', 'infer')
         self.fudge = 0.02  #  expected fractional tolerance (std. dev) ~= 2%
-        self.capture_every = capture_every
-        self.verbose = verbose
-        self.drop_unary = drop_unary
-        self.scale = scale
-        if self.compute_device is None:
-            self.compute_device = get_compute_device()
+        self.capture_every = cfg['model']['misc'].get('capture_every', None)
+        self.verbose = cfg['model']['misc'].get('verbose', True)
+        self.drop_unary = cfg['model']['misc'].get('drop_unary', True)
+        self.scale = cfg['model']['misc'].get('scale', True)
         self.capture_flag = False
         self.formula_current = None
         self.act_v = None
@@ -62,7 +54,6 @@ class Model():
             rank_zero_debug('\nModel architecture: out_dims, d_model, N, heads')
             rank_zero_debug(f'{self.model.out_dims}, {self.model.d_model}, '
                   f'{self.model.N}, {self.model.heads}')
-            rank_zero_debug(f'Running on compute device: {self.compute_device}')
             rank_zero_debug(f'Model size: {count_parameters(self.model)} parameters\n')
         if self.capture_every is not None:
             rank_zero_debug(f'capturing attention tensors every {self.capture_every}')
@@ -76,6 +67,10 @@ class Model():
                                      inference=inference,
                                      verbose=self.verbose,
                                      drop_unary=self.drop_unary,
+                                     num_workers=self.cfg['model']['misc'].get('num_workers', 0),
+                                     tokens = self.cfg['vocab']['tokens'],
+                                     scale_lp = self.cfg['task']['scale_lp'],
+                                     data_path =  self.cfg['task']['src'].replace("$root", self.cfg['task']['root']),
                                      scale=self.scale)
         rank_zero_debug(f'loading data with up to {data_loaders.n_elements:0.0f} '
               f'elements in the formula')
@@ -103,7 +98,7 @@ class Model():
         for i, data in enumerate(self.train_loader):
             self.step_count += 1
             log_wandb_metrics(self.fabric, {f"{self._log_prefix}/step": self.step_count}, step=self.step_count)
-            X, y, formula = data
+            X, y, formula, sg, lp = data
             y = self.scaler.scale(y)
             src, frac = X.squeeze(-1).chunk(2, dim=1)
             # add a small jitter to the input fractions to improve model
@@ -114,15 +109,11 @@ class Model():
             frac[src == 0] = 0
             frac = frac / frac.sum(dim=1).unsqueeze(1).repeat(1, frac.shape[-1])
 
-            src = src.to(self.compute_device,
-                         dtype=torch.long,
-                         non_blocking=True)
-            frac = frac.to(self.compute_device,
-                           dtype=data_type_torch,
-                           non_blocking=True)
-            y = y.to(self.compute_device,
-                     dtype=data_type_torch,
-                     non_blocking=True)
+            src = src.to(dtype=torch.long)
+            frac = frac.to(dtype=data_type_torch)
+            y = y.to(dtype=data_type_torch)
+            sg = sg.to(dtype=torch.long)
+            lp = lp.to(dtype=data_type_torch)
 
             ##################################
             # Force evaluate dataset so that we can capture it in the hook
@@ -137,15 +128,17 @@ class Model():
                 self.capture_flag = False
             ##################################
 
-            output = self.model.forward(src, frac)
+            output = self.model(src, frac, sg_t=sg, x_lp=lp)
             prediction, uncertainty = output.chunk(2, dim=-1)
             loss = self.criterion(prediction.view(-1),
                                   uncertainty.view(-1),
                                   y.view(-1))
 
             self.fabric.backward(loss)
-            log_wandb_metrics(self.fabric, {f"{self._log_prefix}/train/loss": loss.item()}, step=self.step_count)
-            # loss.backward()
+            loss_value = loss.detach().item()
+            log_wandb_metrics(self.fabric, {f"{self._log_prefix}/train/loss": loss_value}, step=self.step_count)
+            # Drop references to this batch's graph before the next forward pass.
+            del loss, output, prediction, uncertainty
             self.optimizer.step()
             self.optimizer.zero_grad()
             if self.stepping:
@@ -209,19 +202,21 @@ class Model():
             
         base_optim = Lamb(params=self.model.parameters())
         optimizer = Lookahead(base_optimizer=base_optim)
-        optimizer = SWA(optimizer)
+        optimizer = SWA(optimizer, 
+                        swa_start = self.cfg['model']['optim']['SWA']['epoch_start'],
+                        swa_lr = self.cfg['model']['optim']['SWA']['swa_lr'],)
 
         self.model, self.optimizer = self.fabric.setup(self.model, optimizer)
         self.train_loader = self.fabric.setup_dataloaders(self.train_loader)
         self.data_loader = self.fabric.setup_dataloaders(self.data_loader)
 
         lr_scheduler = CyclicLR(self.optimizer,
-                                base_lr=1e-4,
-                                max_lr=6e-3,
+                                base_lr= self.cfg['model']['optim']['scheduler']['base_lr'],
+                                max_lr= self.cfg['model']['optim']['scheduler']['max_lr'],
                                 cycle_momentum=False,
                                 step_size_up=self.step_size)
 
-        self.swa_start = 2  # start at (n/2) cycle (lr minimum)
+        self.swa_start = self.cfg['model']['optim']['SWA']['epoch_start']
         self.lr_scheduler = lr_scheduler
         self.stepping = True
         self.lr_list = []
@@ -237,7 +232,6 @@ class Model():
                 self.epochs = epochs
                 ti = time()
                 self.train()
-                # pbar.update(1)
                 # print(f'epoch time: {(time() - ti):0.3f}')
                 rank_zero_debug(f'Learning rate: {self.optimizer.param_groups[0]["lr"]}')
                 self.lr_list.append(self.optimizer.param_groups[0]['lr'])
@@ -311,6 +305,7 @@ class Model():
                         plt.xlabel('epochs')
                         plt.ylabel('MAE')
                         plt.legend()
+                        plt.close()
                         # plt.show()
                     
                 if (epoch == epochs-1 or
@@ -350,7 +345,7 @@ class Model():
                     log_wandb_metrics(self.fabric, {f"{self._log_prefix}/loss_curve": wandb.Image(plt)})
                     if self.cfg["logger"]["type"] == "debug":
                         plt.savefig(f'figures/lc_data/{self.model_name}_lc.png')
-
+                    plt.close()
                 if self.cfg['model']['optim']['early_stopping'] and self.optimizer.discard_count >= self.discard_n:
                     rank_zero_debug(f'Discarded: {self.optimizer.discard_count}/'
                         f'{self.discard_n} weight updates, '
@@ -381,7 +376,7 @@ class Model():
         self.model.eval()
         with torch.no_grad():
             for i, data in enumerate(loader):
-                X, y, formula = data
+                X, y, formula, sg, lp = data
                 if self.capture_flag:
                     self.formula_current = None
                     # HACK for PyTorch v1.8.0
@@ -391,18 +386,17 @@ class Model():
                     elif isinstance(formula, list):
                         self.formula_current = formula.copy()
                 src, frac = X.squeeze(-1).chunk(2, dim=1)
-                src = src.to(self.compute_device,
-                             dtype=torch.long,
-                             non_blocking=True)
-                frac = frac.to(self.compute_device,
-                               dtype=data_type_torch,
-                               non_blocking=True)
-                y = y.to(self.compute_device,
-                         dtype=data_type_torch,
-                         non_blocking=True)
-                output = self.model.forward(src, frac)
+                src = src.to(dtype=torch.long)
+                frac = frac.to(dtype=data_type_torch)
+                y = y.to(dtype=data_type_torch)
+                sg = sg.to(dtype=torch.long)
+                lp = lp.to(dtype=data_type_torch)
+                output = self.model(src, frac, sg_t=sg, x_lp=lp)
                 prediction, uncertainty = output.chunk(2, dim=-1)
-                uncertainty = torch.exp(uncertainty) * self.scaler.std
+                scaler_std = self.scaler.std.to(
+                    device=uncertainty.device, dtype=uncertainty.dtype
+                )
+                uncertainty = torch.exp(uncertainty) * scaler_std
                 prediction = self.scaler.unscale(prediction)
                 if self.classification:
                     prediction = torch.sigmoid(prediction)
@@ -425,11 +419,11 @@ class Model():
     def save_network(self, model_name=None):
         if model_name is None:
             model_name = self.model_name
-            os.makedirs('models/trained_models', exist_ok=True)
-            path = f'models/trained_models/{model_name}.pth'
+            os.makedirs(f'{self.cfg["logger"]["results"]}/models/trained_models', exist_ok=True)
+            path = f'{self.cfg["logger"]["results"]}/models/trained_models/{model_name}.pth'
             rank_zero_debug(f'Saving network ({model_name}) to {path}')
         else:
-            path = f'models/trained_models/{model_name}.pth'
+            path = f'{self.cfg["logger"]["results"]}/models/trained_models/{model_name}.pth'
             rank_zero_debug(f'Saving checkpoint ({model_name}) to {path}')
 
         save_dict = {'weights': self.model.state_dict(),
@@ -439,8 +433,9 @@ class Model():
 
 
     def load_network(self, path):
-        path = f'models/trained_models/{path}'
-        network = torch.load(path, map_location=self.compute_device)
+        # load from logger results directory if it exists
+        path = f'{self.cfg["logger"]["results"]}/models/trained_models/{path}'
+        network = torch.load(path, map_location=torch.device(self.cfg['device']))
         base_optim = Lamb(params=self.model.parameters())
         optimizer = Lookahead(base_optimizer=base_optim)
         self.optimizer = SWA(optimizer)

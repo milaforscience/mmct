@@ -1,0 +1,42 @@
+arch:
+  out_dims: 3
+  d_model: 512
+  N: 3
+  heads: 4
+  residual_nn: 'roost'
+  combined_nheads: 4
+  combined_hidden: 1024
+  dropout: 0.1
+  combined_layers: 4
+  sg_heads: 4
+  sg_fc_dim: 512
+  sg_layers: 2
+  sg_droprate: 0.1
+  lp_inp: 6
+  lp_hidden: 256
+  lp_batch_norm: True
+  enable_mod:
+    sg: false
+    lp: false
+    wk: false
+    geo: false
+optim:
+  losscurve: true
+  early_stopping: true
+  epochs: 300
+  scheduler:
+    base_lr: 1e-4
+    max_lr: 6e-3
+    decay_factor: 0.5
+    epochs_step: 1
+  SWA:
+    epoch_start: 2   # 80% of total epochs (or pass integer epoch like 80)
+    swa_lr: 1e-4      # The final targeted SWA learning rate
+    epochs: 5          # annealing_epochs=5,          # Takes 5 epochs to transition from current LR to swa_lrs
+    strategy: cos      # annealing_strategy="cos"     # Cosine transition curve
+
+misc:
+  n_elements: 'infer'
+  capture_every: null
+  drop_unary: True
+  scale: True

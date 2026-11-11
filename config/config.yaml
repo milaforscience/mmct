@@ -1,9 +1,17 @@
 defaults:
-  - task: dielectric
-  - model: mmct_base
+  - task: eform
+  - model: mmct
   - logger: online
+  - vocab: ${model}
   - _self_
 
+
+hydra:
+  run:
+    dir: ${logger.results}/hydra/${hydra.job.name}/${now:%Y-%m-%d_%H-%M}
+
+device: null
+num_workers: 2
 n_splits: 5
 test: true
 seed: 12345

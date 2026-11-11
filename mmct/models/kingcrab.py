@@ -6,6 +6,9 @@ import pandas as pd
 import torch
 from torch import nn
 
+from mmct.models.encoders import GeometryEncoder, LatticeParametersEncoder, SpaceGroupEncoder, WyckoffEncoder
+from mmct.utils.utils import rank_zero_info, sort_batched
+
 
 # %%
 RNG_SEED = 42
@@ -52,11 +55,9 @@ class ResidualNetwork(nn.Module):
 # %%
 class Embedder(nn.Module):
     def __init__(self,
-                 d_model,
-                 compute_device=None):
+                 d_model):
         super().__init__()
         self.d_model = d_model
-        self.compute_device = compute_device
 
         elem_dir = Path(__file__).resolve().parents[1] / 'data' / 'element_properties'
         # # Choose what element information the model receives
@@ -66,12 +67,12 @@ class Embedder(nn.Module):
 
         cbfv = pd.read_csv(mat2vec, index_col=0).values
         feat_size = cbfv.shape[-1]
-        self.fc_mat2vec = nn.Linear(feat_size, d_model).to(self.compute_device)
+        self.fc_mat2vec = nn.Linear(feat_size, d_model)
         zeros = np.zeros((1, feat_size))
         cat_array = np.concatenate([zeros, cbfv])
         cat_array = torch.as_tensor(cat_array, dtype=data_type_torch)
         self.cbfv = nn.Embedding.from_pretrained(cat_array) \
-            .to(self.compute_device, dtype=data_type_torch)
+            .to(dtype=data_type_torch)
 
     def forward(self, src):
         mat2vec_emb = self.cbfv(src)
@@ -89,13 +90,11 @@ class FractionalEncoder(nn.Module):
     def __init__(self,
                  d_model,
                  resolution=100,
-                 log10=False,
-                 compute_device=None):
+                 log10=False):
         super().__init__()
         self.d_model = d_model//2
         self.resolution = resolution
         self.log10 = log10
-        self.compute_device = compute_device
 
         x = torch.linspace(0, self.resolution - 1,
                            self.resolution,
@@ -135,17 +134,14 @@ class Encoder(nn.Module):
                  N,
                  heads,
                  frac=False,
-                 attn=True,
-                 compute_device=None):
+                 attn=True):
         super().__init__()
         self.d_model = d_model
         self.N = N
         self.heads = heads
         self.fractional = frac
         self.attention = attn
-        self.compute_device = compute_device
-        self.embed = Embedder(d_model=self.d_model,
-                              compute_device=self.compute_device)
+        self.embed = Embedder(d_model=self.d_model)
         self.pe = FractionalEncoder(self.d_model, resolution=5000, log10=False)
         self.ple = FractionalEncoder(self.d_model, resolution=5000, log10=True)
 
@@ -199,19 +195,62 @@ class CrabNet(nn.Module):
                  d_model=512,
                  N=3,
                  heads=4,
-                 compute_device=None,
-                 residual_nn='roost'):
+                 residual_nn='roost',
+                 tokens = {},
+                 **kwargs):
         super().__init__()
         self.avg = True
         self.out_dims = out_dims
         self.d_model = d_model
         self.N = N
         self.heads = heads
-        self.compute_device = compute_device
+        self.tokens = tokens
         self.encoder = Encoder(d_model=self.d_model,
                                N=self.N,
-                               heads=self.heads,
-                               compute_device=self.compute_device)
+                               heads=self.heads)
+        self.enable_mod = kwargs.get('enable_mod', {})
+
+        if self.enable_mod.get('sg', False):
+            rank_zero_info('sg enabled') 
+            self.sg_encoder = SpaceGroupEncoder(
+                len(tokens["sg"]),
+                kwargs.get('sg_heads', 2),
+                kwargs.get('sg_fc_dim', 1024),
+                kwargs.get('sg_layers', 2),
+                self.d_model, 
+                kwargs.get('sg_droprate', 0.2)
+            )
+        if self.enable_mod.get('lp', False):
+            rank_zero_info('lp enabled')
+            self.lp_encoder = LatticeParametersEncoder(
+                kwargs.get('lp_inp', 6), 
+                kwargs.get('lp_hidden', 128), 
+                self.d_model,
+                kwargs.get('lp_batch_norm', True) 
+            )
+        if self.enable_mod.get('wk', False):
+            rank_zero_info('wk enabled')
+            self.wk_encoder = WyckoffEncoder(
+                kwargs.get('use_pretrained_wk', False),
+                kwargs.get('wk_pairwise_attn', False),
+                kwargs.get('wk_n_tokens', 0),
+                self.encoder,
+                kwargs.get('wk_pairwise_heads', 2),
+                kwargs.get('wk_fc_dim', 1024),
+                kwargs.get('wk_pairwise_layers', 2),
+                self.d_model,
+                kwargs.get('wk_droprate', 0.2),
+                tokens['comp']
+            )
+        
+        if self.enable_mod.get('geo', False):
+            rank_zero_info('geo enabled')
+            self.geo_encoder = GeometryEncoder(
+                kwargs.get('k', 256),
+                kwargs.get('geo_apply_weights', False),
+                self.d_model
+            )
+                    
         if residual_nn == 'roost':
             # use the Roost residual network
             self.out_hidden = [1024, 512, 256, 128]
@@ -225,19 +264,86 @@ class CrabNet(nn.Module):
                                              self.out_dims,
                                              self.out_hidden)
 
-    def forward(self, src, frac):
-        output = self.encoder(src, frac)
+        self.n_mods = sum(self.enable_mod.values()) + 1
+        rank_zero_info(f"{self.n_mods} encoders enabled")
+        if self.n_mods>1:
+            self.modalities = nn.Parameter(torch.randn(1, self.n_mods + 1, self.d_model))
+            self.cls_token = nn.Parameter(torch.randn(1, 1, self.d_model))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.d_model,
+                nhead=kwargs.get('combined_nheads', 4),
+                dim_feedforward=kwargs.get('combined_hidden', 1024),
+                dropout=kwargs.get('dropout', 0.1),
+                batch_first=True,
+            )
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer, num_layers=kwargs.get('combined_layers', 3)
+            )
 
+    def forward(self, src, frac, **kwargs):
+        # missing_mask = src==self.tokens['comp']["[MISSING]"]
+        padding_mask = src== 0 # self.tokens['comp']["[PAD]"]
+
+        # src[missing_mask] = self.tokens['comp']["[PAD]"]
+
+        comp_encoding = self.encoder(src, frac)
+    
+        # src, comp_encoding = sort_batched(src, comp_encoding)
+
+        encodings = [comp_encoding]
+        sg_t = kwargs.get('sg_t', None)
+        x_lp = kwargs.get('x_lp', None)
+        wk_i = kwargs.get('wk_i', None)
+        wk_e = kwargs.get('wk_e', None)
+        pdd = kwargs.get('pdd', None)
+        pdd_e = kwargs.get('pdd_e', None)
+
+        if self.enable_mod['sg'] and sg_t is not None:
+            sg_encoding = self.sg_encoder(sg_t)
+            sg_encoding = sg_encoding.unsqueeze(1).expand(-1, comp_encoding.shape[1], -1)
+            encodings.append(sg_encoding)
+
+        if self.enable_mod['lp'] and x_lp is not None:
+            lp_encodings = self.lp_encoder(x_lp)
+            lp_encodings = lp_encodings.unsqueeze(1).expand(-1, comp_encoding.shape[1], -1)
+            encodings.append(lp_encodings)
+
+        if self.enable_mod['wk'] and wk_e is not None and wk_i is not None:
+            wk_encodings = self.wk_encoder(wk_e, wk_i) # bs, comp_len, n_embed
+            encodings.append(wk_encodings)
+
+        if self.enable_mod['geo'] and pdd is not None and pdd_e is not None:
+            geo_encodings = self.geo_encoder(pdd, pdd_e)
+            encodings.append(geo_encodings)
+
+
+        # output = self.transfer_nn(output)
+
+        output = torch.stack(encodings, dim=2) if len(encodings) > 1 else encodings[0] # bs, comp_len, 2, d_model
+
+        if self.n_mods>1:
+            bs, comp_len = output.shape[0], output.shape[1]
+            output = output.reshape(bs * comp_len, -1, self.d_model)
+            cls_tokens = self.cls_token.expand(bs * comp_len, -1, -1)
+            output = torch.cat((cls_tokens, output), dim=1)
+            output = output + self.modalities
+            mask = padding_mask.reshape(bs * comp_len, -1).expand(-1, self.n_mods)
+            cls_mask_pad = torch.zeros((bs * comp_len, 1), dtype=torch.bool, device=mask.device)
+            # Prepend it to the original padding mask -> shape becomes (B, num_patches + 1)
+            src_key_padding_mask = torch.cat((cls_mask_pad, mask), dim=1)
+        
+            output = self.transformer_encoder(output, src_key_padding_mask=src_key_padding_mask)
+            output = output[:, 0, :].reshape(bs, comp_len, self.d_model)
         # average the "element contribution" at the end
         # mask so you only average "elements"
-        mask = (src == 0).unsqueeze(-1).repeat(1, 1, self.out_dims)
+        mask = padding_mask.unsqueeze(-1).repeat(1, 1, self.out_dims)
         output = self.output_nn(output)  # simple linear
         if self.avg:
             output = output.masked_fill(mask, 0)
-            output = output.sum(dim=1)/(~mask).sum(dim=1)
+            output = output.sum(dim=1) / (~mask).sum(dim=1)
             output, logits = output.chunk(2, dim=-1)
             probability = torch.ones_like(output)
-            probability[:, :logits.shape[-1]] = torch.sigmoid(logits)
+            probability[:, : logits.shape[-1]] = torch.sigmoid(logits)
             output = output * probability
 
         return output

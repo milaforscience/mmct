@@ -3,7 +3,7 @@ name = "mmct"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "hydra-core>=1.4.0.dev0",
     "lightning>=2.6.6",
@@ -12,10 +12,17 @@ dependencies = [
     "pandas>=3.0.6",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
-    "torch>=2.14.1",
+    "torch==2.14.1",
     "tqdm>=4.70.1",
     "wandb>=0.31.0",
 ]
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
 
 [dependency-groups]
 dev = [

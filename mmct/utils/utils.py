@@ -22,11 +22,12 @@ from torch import nn
 
 from sklearn.preprocessing import StandardScaler, Normalizer
 from lightning.pytorch.loggers import CSVLogger, WandbLogger
-from lightning.pytorch.loggers.logger import DummyLogger
 from lightning.fabric.utilities.rank_zero import rank_zero_only
 import json
+import yaml
 
 from mmct.utils.composition import generate_features, _element_composition
+from mmct.utils.tokenizer import sg_tokenizer
 
 plt.rcParams.update({'font.size': 16})
 
@@ -412,12 +413,16 @@ class Scaler():
 
     def scale(self, data):
         data = torch.as_tensor(data)
-        data_scaled = (data - self.mean) / self.std
+        mean = self.mean.to(device=data.device, dtype=data.dtype)
+        std = self.std.to(device=data.device, dtype=data.dtype)
+        data_scaled = (data - mean) / std
         return data_scaled
 
     def unscale(self, data_scaled):
         data_scaled = torch.as_tensor(data_scaled)
-        data = data_scaled * self.std + self.mean
+        mean = self.mean.to(device=data_scaled.device, dtype=data_scaled.dtype)
+        std = self.std.to(device=data_scaled.device, dtype=data_scaled.dtype)
+        data = data_scaled * std + mean
         return data
 
     def state_dict(self):
@@ -456,15 +461,27 @@ class EDMDataset(Dataset):
     Get X and y from EDM dataset.
     """
 
-    def __init__(self, dataset, n_comp):
+    def __init__(self, dataset, n_comp, scale_lp={}, data_path=''):
         self.data = dataset
         self.n_comp = n_comp
-
+        if scale_lp:
+            self.scale = {}
+            self.scale["mean"] = torch.load(
+                Path(data_path) / "x.mean", map_location="cpu"
+            )
+            self.scale["std"] = torch.load(
+                Path(data_path) / "x.std", map_location="cpu"
+            )
+        else:
+            self.scale = {}
+        
         self.X = np.array(self.data[0])
         self.y = np.array(self.data[1])
         self.formula = np.array(self.data[2])
+        self.sg_list = np.array(self.data[3])
+        self.lp = np.array(self.data[4])
 
-        self.shape = [(self.X.shape), (self.y.shape), (self.formula.shape)]
+        self.shape = [(self.X.shape), (self.y.shape), (self.formula.shape), (self.sg_list.shape), (self.lp.shape)]
 
     def __str__(self):
         string = f'EDMDataset with X.shape {self.X.shape}'
@@ -477,16 +494,22 @@ class EDMDataset(Dataset):
         X = self.X[idx, :, :]
         y = self.y[idx]
         formula = self.formula[idx]
+        sg = self.sg_list[idx]
+        lp = self.lp[idx]
 
         X = torch.as_tensor(X, dtype=data_type_torch)
         y = torch.as_tensor(y, dtype=data_type_torch)
+        sg = torch.as_tensor(sg, dtype=data_type_torch)
+        lp = torch.as_tensor(lp, dtype=data_type_torch)
+        if self.scale:
+            lp = (lp - self.scale["mean"]) / self.scale["std"]
 
-        return (X, y, formula)
+        return (X, y, formula, sg, lp)
 
 
 def get_edm(path, elem_prop='mat2vec', n_elements='infer',
             inference=False, verbose=True, drop_unary=True,
-            scale=True):
+            scale=True, tokens={}):
     """
     Build a element descriptor matrix.
 
@@ -525,7 +548,7 @@ def get_edm(path, elem_prop='mat2vec', n_elements='infer',
         df = pd.read_csv(path, keep_default_na=False, na_values=[''])
     else:
         df = path
-
+    
     if 'formula' not in df.columns.values.tolist():
         df['formula'] = df['cif_id'].str.split('_ICSD').str[0]
 
@@ -542,6 +565,11 @@ def get_edm(path, elem_prop='mat2vec', n_elements='infer',
 
     y = df['target'].values.astype(data_type_np)
     formula = df['formula'].values
+    # apply sg_vocab function in tokenizer to the column for Space Group and return the series similar to formula vectorize the operation
+    sg_list = df['Space Group'].apply(lambda x: sg_tokenizer(int(x), tokens['sg']))
+
+    lp = df[['a', 'b', 'c', 'alpha', 'beta', 'gamma']].values
+
     if n_elements == 'infer':
         # cap maximum elements at 16, and then infer n_elements
         n_elements = 16
@@ -587,7 +615,7 @@ def get_edm(path, elem_prop='mat2vec', n_elements='infer',
     elem_frac = elem_frac.reshape(elem_frac.shape[0], elem_frac.shape[1], 1)
     out = np.concatenate((elem_num, elem_frac), axis=1)
 
-    return out, y, formula
+    return out, y, formula, sg_list, lp
 
 
 # %%
@@ -610,15 +638,19 @@ class EDM_CsvLoader():
         Whether to shuffle the datasets or not
     """
 
-    def __init__(self, csv_data, batch_size=64,
+    def __init__(self, csv_data, tokens={}, scale_lp={}, data_path = '', batch_size=64,
                  num_workers=1, random_state=0, shuffle=True,
                  pin_memory=True, n_elements=6, inference=False,
                  verbose=True,
                  drop_unary=True,
                  scale=True):
         self.csv_data = csv_data
+        self.tokens = tokens
+        self.scale_lp = scale_lp
+        self.data_path = data_path
         self.main_data = list(get_edm(self.csv_data, elem_prop='mat2vec',
                                       n_elements=n_elements,
+                                      tokens = tokens,
                                       inference=inference,
                                       verbose=verbose,
                                       drop_unary=drop_unary,
@@ -628,6 +660,7 @@ class EDM_CsvLoader():
 
         self.batch_size = batch_size
         self.pin_memory = pin_memory
+        self.num_workers = num_workers
         self.shuffle = shuffle
         self.random_state = random_state
 
@@ -636,11 +669,12 @@ class EDM_CsvLoader():
         Input the dataset, get train test split
         '''
         shuffle = not inference  # don't shuffle data when inferencing
-        pred_dataset = EDMDataset(self.main_data, self.n_elements)
+        pred_dataset = EDMDataset(self.main_data, self.n_elements, self.scale_lp, self.data_path)
         pred_loader = DataLoader(pred_dataset,
                                  batch_size=self.batch_size,
                                  pin_memory=self.pin_memory,
-                                 shuffle=shuffle)
+                                 shuffle=shuffle,
+                                 num_workers=self.num_workers)
         return pred_loader
 
 
@@ -953,6 +987,47 @@ def to_dict(cfg: Any) -> DictConfig:
     if isinstance(cfg, DictConfig):
         cfg = OmegaConf.to_container(cfg, resolve=True)
     return cfg
+
+
+def load_vocab(vocab: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Process vocabulary configuration for a specific model by assigning token indices.
+
+    Args:
+        vocab (dict): Configuration dictionary containing 'name' and 'tokens'.
+        model_name (str): name/version of model to load vocab for
+
+    Returns:
+        dict: Updated vocabulary dictionary with index mappings.
+    """
+    components = vocab["tokens"]
+    tokens = {}
+    for c in components:
+        vocab_path = ROOT / "config" / "vocab" / f"{c}_vocab.yaml"
+        tmp = yaml.safe_load(open(vocab_path, "r"))
+        tokens[c] = {t: i for i, t in enumerate(tmp["tokens"])}
+    vocab["tokens"] = tokens
+    return vocab
+
+
+
+def build_vocab(cfg: Dict[str, Any] | DictConfig) -> Dict[str, Any]:
+    """Load and normalize vocab settings for runtime construction."""
+    if isinstance(cfg, DictConfig):
+        cfg = to_dict(cfg)
+    cfg["vocab"] = load_vocab(cfg["vocab"])
+    return cfg["vocab"]
+
+
+
+def sort_batched(idx, mat):
+
+    order = torch.argsort(idx, dim=1)
+    idx_sorted = torch.gather(idx, dim=1, index=order)
+    mat_order = order.unsqueeze(-1).expand(-1, -1, mat.size(-1))
+    mat_sorted = torch.gather(mat, dim=1, index=mat_order)
+
+    return idx_sorted, mat_sorted
 
 # %%
 if __name__ == '__main__':

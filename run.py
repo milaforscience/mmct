@@ -1,5 +1,6 @@
 import logging
 import os
+import gc
 import fcntl
 import json
 import hydra
@@ -14,21 +15,18 @@ import re
 
 from mmct.models.kingcrab import CrabNet
 from mmct.models.model import Model
-from mmct.utils.utils import build_logger, checkpoint_saving_enabled, get_expt_choices, log_wandb_metrics, rank_zero_debug, rank_zero_info, setup_logging, to_dict
+from mmct.utils.utils import build_logger, build_vocab, checkpoint_saving_enabled, get_expt_choices, log_wandb_metrics, rank_zero_debug, rank_zero_info, setup_logging, to_dict
 from mmct.utils.get_compute_device import get_compute_device
-
-compute_device = get_compute_device(force_cpu=False)
 
 # %%
 def get_model(task, i, cfg, fabric, batch_size=None,
               transfer=None, verbose=True):
     # Get the TorchedCrabNet architecture loaded
     model_name = f'{cfg["model"]["name"]}{task}_{i}'
-    model = Model(CrabNet(compute_device=compute_device, **cfg["model"]["arch"]).to(compute_device),
+    model = Model(CrabNet(tokens = cfg['vocab']['tokens'], **cfg["model"]["arch"]),
                     fabric,
                     cfg,
-                    model_name=model_name, 
-                    **cfg["model"]["misc"]
+                    model_name=model_name
                   )
 
     # Train network starting at pretrained weights
@@ -63,8 +61,8 @@ def get_model(task, i, cfg, fabric, batch_size=None,
         if "Formulae" in val_df.columns:
             val_df = val_df.rename(columns={"Formulae": "formula", cfg["task"]["target"]: "target"})
         # select only formula and target columns
-        train_df = train_df[['formula', 'target']]
-        val_df = val_df[['formula', 'target']]
+        train_df = train_df[['formula', 'target', 'Space Group', 'a', 'b', 'c', 'alpha', 'beta', 'gamma']]
+        val_df = val_df[['formula', 'target', 'Space Group', 'a', 'b', 'c', 'alpha', 'beta', 'gamma']]
     else:
         raise ValueError(f'Data files for {task} not found at {cfg["task"]["data_path"]}. Please ensure that train{i}.csv and val{i}.csv or train.csv and val.csv are present in the directory.')
 
@@ -98,12 +96,11 @@ def to_csv(output_df, save_name):
 
 def load_model(task, i, cfg, file_name, fabric, verbose=True):
     # Load up a saved network.
-    model_name = f'{cfg["model"]["name"]}{task}{i}'
-    model = Model(CrabNet(compute_device=compute_device, **cfg["model"]["arch"]).to(compute_device),
+    model_name = f'{cfg["model"]["name"]}{task}_{i}'
+    model = Model(CrabNet(tokens = cfg['vocab']['tokens'], **cfg["model"]["arch"]),
                     fabric,
                     cfg,
-                    model_name=model_name,
-                    **cfg["model"]["misc"]
+                    model_name=model_name
                 )
     model.load_network(f'{model_name}.pth')
 
@@ -113,13 +110,14 @@ def load_model(task, i, cfg, file_name, fabric, verbose=True):
     data = f'{cfg["task"]["data_path"]}/{file_name}'
     # data is reloaded to model.data_loader
     data = pd.read_csv(data)
+
     if 'Fold' in data.columns:
         data = data[data['Fold'] == i]
         if "Formulae" in data.columns:
             # rename to formula
             data = data.rename(columns={"Formulae": "formula", cfg["task"]["target"]: "target"})
         # select only formula and target columns
-        data = data[['formula', 'target']]
+        data = data[['formula', 'target', 'Space Group', 'a', 'b', 'c', 'alpha', 'beta', 'gamma']]
     
     model.load_data(data, batch_size=2**9)
     return model
@@ -156,6 +154,13 @@ def run_experiment(cfg, model_name, task, log):
     cfg["task"]["data_path"] = cfg["task"]["src"].replace("$root", cfg["task"]["root"])
     cfg["model"]["name"] = model_name
     cfg["logger"]["type"] = log
+
+    enable_mod = cfg["model"]['arch'].get("enable_mod", {})
+    if enable_mod and any(enable_mod.values()):
+        model_name = "MMCT"
+        names = [model_name] + [k for k, v in enable_mod.items() if v]
+        model_name = ' + '.join(names)
+
     cfg["logger"]["name"] = cfg["logger"].get("name") or f"{model_name}_{task}"
 
     if log == "debug":
@@ -169,23 +174,24 @@ def run_experiment(cfg, model_name, task, log):
     save_checkpoints = checkpoint_saving_enabled(cfg)
     is_verbose = logger_cfg["type"] == "debug"
 
+    cfg['vocab'] = build_vocab(cfg)
+    
     shared_logObj = build_logger(logger_cfg, log_model=save_checkpoints, config=cfg)
-
+    compute_device = get_compute_device(force_cpu=cfg['device']=='cpu')
+    cfg['device'] = compute_device
     fabric = Fabric(loggers=shared_logObj, accelerator=compute_device)
     fabric.launch()
 
-    # shared_wandb_experiment = (
-    #     shared_logObj.experiment if logger_cfg["type"] == "online" else None
-    # )
-    # fabric.
+    rank_zero_info(f"device: {compute_device}")
 
     n_splits = cfg["n_splits"]
     t_maes = []
     v_maes = []
     for i in range(n_splits):
+        model_test = None
+        model_val = None
         
         rank_zero_info(f'property: {task}, cv {i}')
-
         rank_zero_debug("Building model for fold %d", i + 1)
                 
         model = get_model(task, i, cfg, fabric, verbose=is_verbose)
@@ -203,31 +209,41 @@ def run_experiment(cfg, model_name, task, log):
         v_maes.append(v_mae)
         log_wandb_metrics(fabric, {f"fold_{i}/val/MAE": v_mae})
 
+        # # Finish all work for this fold before releasing its DDP wrapper and
+        # # preparing another one on the same process group.
+        # fabric.barrier()
+        # del model, model_test, model_val
+        # gc.collect()
+        # if compute_device == "cuda":
+        #     torch.cuda.empty_cache()
+        # fabric.barrier()
+
     log_wandb_metrics(fabric, {f"avg_val_mae": float(np.mean(v_maes)), f"std_val_mae": float(np.std(v_maes))})
     if cfg["test"]:
         avg_test_mae = float(np.mean(t_maes))
         std_test_mae = float(np.std(t_maes))
         rank_zero_info(f'Average test mae: {avg_test_mae}')
-        if cfg["logger"]["type"] == "debug":
-            results_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'{cfg["task"]["root"].split("/")[-1]}_test.txt')
-            # Keep parallel task runs from overwriting each other's results.
-            with open(results_path, 'a+', encoding='utf-8') as results_file:
-                try:
-                    fcntl.flock(results_file.fileno(), fcntl.LOCK_EX)
-                    results_file.seek(0)
-                    contents = results_file.read()
-                    results = json.loads(contents) if contents.strip() else {}
-                    results[task] = f"{avg_test_mae} ± {std_test_mae}"
-                    updated_results = json.dumps(results, indent=4, ensure_ascii=False) + '\n'
-                    results_file.truncate(0)
-                    rank_zero_debug(f"Saving results to {results_path}: {updated_results.strip()}")
-                    results_file.write(updated_results)
-                except BlockingIOError:
-                    rank_zero_debug(f"Could not acquire lock on {results_path}. Results may not be saved correctly.")
-                finally:
-                    fcntl.flock(results_file.fileno(), fcntl.LOCK_UN)
-        else:
-            log_wandb_metrics(fabric, {f"avg_test_mae": avg_test_mae, f"std_test_mae": std_test_mae})
+
+        en_mod = "_".join([k for k, v in enable_mod.items() if v])
+        results_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'{cfg["task"]["root"].split("/")[-1]}_{en_mod}_test.txt')
+        # Keep parallel task runs from overwriting each other's results.
+        with open(results_path, 'a+', encoding='utf-8') as results_file:
+            try:
+                fcntl.flock(results_file.fileno(), fcntl.LOCK_EX)
+                results_file.seek(0)
+                contents = results_file.read()
+                results = json.loads(contents) if contents.strip() else {}
+                results[task] = f"{avg_test_mae} ± {std_test_mae}"
+                updated_results = json.dumps(results, indent=4, ensure_ascii=False) + '\n'
+                results_file.truncate(0)
+                rank_zero_debug(f"Saving results to {results_path}: {updated_results.strip()}")
+                results_file.write(updated_results)
+            except BlockingIOError:
+                rank_zero_debug(f"Could not acquire lock on {results_path}. Results may not be saved correctly.")
+            finally:
+                fcntl.flock(results_file.fileno(), fcntl.LOCK_UN)
+        
+        log_wandb_metrics(fabric, {f"avg_test_mae": avg_test_mae, f"std_test_mae": std_test_mae})
     rank_zero_debug('=====================================================')
 
 

@@ -1,0 +1,10 @@
+tokens:
+  - comp
+  - sg
+
+max_atom_count: 828
+
+wk_embed_file: wyckoff_embeddings_mean
+wk_n_tokens: 990
+
+use_atom_fractions: true
